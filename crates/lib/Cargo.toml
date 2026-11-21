@@ -1,11 +1,17 @@
 [package]
-name = "lib"
-version.workspace = true
+name                 = "noctalia"
+version.workspace    = true
 repository.workspace = true
-edition.workspace = true
-license.workspace = true
+edition.workspace    = true
+license.workspace    = true
+description          = "Write Noctalia plugins in Rust"
+readme               = "../../README.md"
+keywords             = ["noctalia", "luau", "plugin", "shell", "framework"]
+categories           = ["development-tools"]
 
 [dependencies]
+serde.workspace      = true
+serde_json.workspace = true
 
 [lints]
 workspace = true
