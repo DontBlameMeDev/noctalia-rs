@@ -1,0 +1,18 @@
+[package]
+name                 = "noctalia-macros"
+version.workspace    = true
+edition.workspace    = true
+license.workspace    = true
+description          = "Unofficial proc macros for noctalia"
+readme               = "../../README.md"
+
+[lib]
+proc-macro = true
+
+[dependencies]
+proc-macro2.workspace = true
+quote.workspace       = true
+syn.workspace         = true
+
+[lints]
+workspace = true

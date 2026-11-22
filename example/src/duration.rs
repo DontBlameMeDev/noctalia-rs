@@ -217,4 +217,30 @@ mod tests {
         assert_eq!(clock(3_900), "1:05:00");
         assert_eq!(clock(90_061), "1d 1:01:01");
     }
+
+    #[test]
+    fn test_human_formats_all_units() {
+        assert_eq!(human(0), "0s");
+        assert_eq!(human(31_536_000 + 90_061), "1y 1d 1h 1m 1s");
+    }
+
+    #[test]
+    fn test_approx_rounds_to_nearest_unit() {
+        assert_eq!(approx(0), "1m");
+        assert_eq!(approx(59), "1m");
+        assert_eq!(approx(90), "2m");
+        assert_eq!(approx(3_600), "1h");
+        assert_eq!(approx(90_000), "1d");
+        assert_eq!(approx(400 * 86_400), "1y");
+    }
+
+    #[test]
+    fn test_helper_functions_cover_edge_cases() {
+        assert_eq!(quotient(10, 0), 0);
+        assert_eq!(remainder(10, 0), 0);
+        assert_eq!(rounded_divisor(10, 3), 3);
+        assert_eq!(unit_seconds('x'), None);
+        assert_eq!(next_unit('s'), None);
+        assert_eq!(split(""), None);
+    }
 }

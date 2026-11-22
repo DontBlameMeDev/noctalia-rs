@@ -1,19 +1,23 @@
+mod desktop;
 mod duration;
 mod launcher;
+mod layer;
 mod panel;
 mod service;
+mod shortcut;
 mod timer;
 mod widget;
 
 use std::process::ExitCode;
 
 use noctalia::run as run_cli;
-use noctalia::{Context, Meta, Op, Plugin, Setting};
+use noctalia::{Context, Entry, EntryKind, MetaBuilder, Op, Plugin, Setting};
 use serde_json::json;
-use timer::{Store, Timer};
 
-pub const PANEL_ID: &str = "dontblameme/timed:panel";
-pub const STATE_KEY: &str = "timed.state";
+use self::timer::{Store, Timer};
+
+pub const PANEL_ID: &str = "iblameyou/example:panel";
+pub const STATE_KEY: &str = "example.state";
 
 const COLORS: &[(&str, &str)] = &[
     ("primary", "settings.color.primary"),
@@ -25,12 +29,12 @@ const COLORS: &[(&str, &str)] = &[
 ];
 
 const TRANSLATIONS: &[(&str, &str)] = &[
-    ("notify.title", "Timed"),
+    ("notify.title", "Example"),
     ("notify.body", "{duration} timer finished"),
     ("bar.empty", "No timers"),
     ("bar.timer", "{duration} timer"),
     ("bar.paused", "Paused - {time}"),
-    ("panel.title", "Timed"),
+    ("panel.title", "Example"),
     ("panel.empty", "No timers running"),
     ("panel.timer", "{duration} timer"),
     ("panel.ends_at", "Ends at {time}"),
@@ -109,14 +113,17 @@ const TRANSLATIONS: &[(&str, &str)] = &[
     ("settings.color.on_surface_variant", "Muted text"),
 ];
 
+#[must_use]
 pub fn publish(store: &Store) -> Op {
     Op::state(STATE_KEY, json!({ "timers": store.timers }))
 }
 
+#[must_use]
 pub fn timers_from_state(ctx: &Context) -> Vec<Timer> {
     ctx.state_value("timers").unwrap_or_default()
 }
 
+#[must_use]
 pub fn add_timer(
     ctx: &Context,
     spec: (&mut Store, u64, Option<String>),
@@ -146,12 +153,14 @@ pub fn add_timer(
     true
 }
 
+#[must_use]
 pub fn stop_by_id(store: &mut Store, id: &str) -> bool {
     let before = store.timers.len();
     store.timers.retain(|timer| timer.id != id);
     store.timers.len() != before
 }
 
+#[must_use]
 pub fn pause_by_id(ctx: &Context, store: &mut Store, id: &str) -> bool {
     let Some(timer) = store
         .timers
@@ -176,6 +185,7 @@ pub fn pause_by_id(ctx: &Context, store: &mut Store, id: &str) -> bool {
     true
 }
 
+#[must_use]
 pub fn resume_by_id(ctx: &Context, store: &mut Store, id: &str) -> bool {
     let Some(timer) = store
         .timers
@@ -241,29 +251,39 @@ fn settings() -> Vec<Setting> {
             ("primary", &colors),
         )
         .description("settings.idle_color.description"),
+        Setting::int(
+            "limit",
+            "settings.limit.label",
+            (10.0, Some(1.0), Some(60.0)),
+        ),
+        Setting::string_list("labels", "settings.labels.label", &["a", "b"]),
+        Setting::glyph("glyph", "settings.glyph.label", "clock"),
     ]
 }
 
 fn build_plugin() -> Plugin {
-    let mut plugin = Plugin::new(
-        Meta::new("dontblameme/timed", "Timed", "0.1.0")
-            .author("DontBlameMe")
-            .plugin_api(48)
-            .description("Countdown timers written in Rust")
-            .tags(&[
-                "launcher",
-                "bar",
-                "panel",
-                "service",
-                "countdown",
-                "utility",
-            ])
-            .icon("clock"),
-    )
-    .service("service", service::update)
-    .widget("timed_indicator", (settings(), widget::update))
-    .launcher("launcher", ("timer", "clock", launcher::update))
-    .panel("panel", (380, 360, panel::update));
+    let meta = MetaBuilder::new()
+        .id("iblameyou/example")
+        .name("Example")
+        .version("0.1.0")
+        .author("IBlameYou")
+        .api(57)
+        .description("Neutral Noctalia plugin example")
+        .tags(&["service", "widget", "panel", "launcher", "demo"])
+        .icon("puzzle")
+        .build();
+
+    let mut plugin = Plugin::new(meta)
+        .entry(service::update_entry())
+        .entry(Entry::new(
+            ("widget".to_owned(), EntryKind::Widget, settings()),
+            widget::update,
+        ))
+        .entry(launcher::update_entry())
+        .entry(panel::update_entry())
+        .entry(shortcut::update_entry())
+        .entry(desktop::update_entry())
+        .entry(layer::update_entry());
 
     for (key, value) in TRANSLATIONS {
         plugin = plugin.tr(key, value);
@@ -272,6 +292,78 @@ fn build_plugin() -> Plugin {
     plugin
 }
 
+#[must_use]
 pub fn run() -> ExitCode {
     run_cli(&build_plugin())
+}
+
+fn main() -> ExitCode {
+    run()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use noctalia::{Parts, Value};
+    use std::path::PathBuf;
+
+    fn context() -> Context {
+        Context::new(
+            Parts {
+                entry: "service".to_owned(),
+                event: "update".to_owned(),
+                payload: Value::Null,
+                config: json!({}),
+                state: json!({ "timers": [
+                    {
+                        "id": "one",
+                        "seconds": 600,
+                        "label": "10m",
+                        "message": null,
+                        "paused": false,
+                        "endsAt": 601_000
+                    }
+                ]}),
+                host: json!({ "now_ms": 1_000 }),
+                data_dir: PathBuf::from("/tmp"),
+            },
+            json!({}),
+        )
+    }
+
+    #[test]
+    fn test_publish_and_timers_from_state() {
+        let context = context();
+        let timers = timers_from_state(&context);
+
+        assert_eq!(timers.len(), 1);
+        let value = serde_json::to_value(publish(&Store::default()))
+            .expect("serialize");
+        assert!(value["value"].get("timers").is_some());
+    }
+
+    #[test]
+    fn test_timer_mutation_helpers() {
+        let context = context();
+        let mut store = Store::default();
+
+        assert!(add_timer(&context, (&mut store, 300, None)));
+        assert!(!add_timer(&context, (&mut store, 0, None)));
+        assert_eq!(store.timers.len(), 1);
+
+        let id = store.timers[0].id.clone();
+        assert!(pause_by_id(&context, &mut store, &id));
+        assert!(resume_by_id(&context, &mut store, &id));
+        assert!(stop_by_id(&mut store, &id));
+    }
+
+    #[test]
+    fn test_settings_and_build_plugin_cover_all_entries() {
+        let settings = settings();
+        let plugin = build_plugin();
+
+        assert!(settings.len() > 10);
+        assert_eq!(plugin.entries.len(), 7);
+        assert_eq!(plugin.meta.id, "iblameyou/example");
+    }
 }

@@ -47,9 +47,14 @@
 
         src = pkgs.lib.cleanSourceWith {
           src = ./.;
-          filter = path: type:
-            craneLib.filterCargoSources path type
-            || builtins.match ".*\\.luau$" (toString path) != null;
+          filter = path: _: let
+            name = builtins.baseNameOf path;
+          in
+            name
+            != "target"
+            && name != ".git"
+            && name != "result"
+            && name != ".direnv";
         };
 
         commonArgs = {
@@ -112,11 +117,6 @@
             rustfmt = mkHook "rustfmt" "nix build .#checks.${system}.fmt --no-link --print-build-logs";
             cargo-check = mkHook "cargo check" "nix build .#checks.${system}.clippy --no-link --print-build-logs";
             clippy = mkHook "clippy" "nix build .#checks.${system}.clippy --no-link --print-build-logs";
-            audit = mkHook "audit" "${pkgs.cargo-audit}/bin/cargo-audit audit";
-            deny = mkHook "deny" "${pkgs.writeShellScript "cargo-deny-check" ''
-              export PATH="${rustToolchain}/bin:${pkgs.cargo-deny}/bin:$PATH"
-              exec ${pkgs.cargo-deny}/bin/cargo-deny check
-            ''}";
             tarpaulin = mkHook "tarpaulin" "nix build .#checks.${system}.tarpaulin --no-link --print-build-logs";
 
             cargo-nextest =
@@ -125,14 +125,14 @@
               "nix build .#checks.${system}.nextest --no-link --print-build-logs";
           };
         };
-        binCargoPath = ./crates/bin/Cargo.toml;
+        binCargoPath = ./example/Cargo.toml;
         cargoToml = builtins.fromTOML (builtins.readFile binCargoPath);
         binName = cargoToml.package.name;
-        helperName = "timed-helper";
+        helperName = "example-helper";
       in {
         formatter = pkgs.alejandra;
         mkPlugin = args:
-          import ./nix/mkPlugin.nix ({ inherit pkgs; } // args);
+          import ./nix/mkPlugin.nix ({inherit pkgs;} // args);
         packages.default = package;
 
         apps.default = {
@@ -188,8 +188,6 @@
               pkg-config
               cargo-nextest
               cargo-watch
-              cargo-audit
-              cargo-deny
               cargo-tarpaulin
               bacon
             ]

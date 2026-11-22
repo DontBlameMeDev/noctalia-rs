@@ -12,6 +12,7 @@ pub struct Parts {
     pub payload: Value,
     pub config: Value,
     pub state: Value,
+    pub host: Value,
     pub data_dir: PathBuf,
 }
 
@@ -21,6 +22,7 @@ pub struct Context {
     pub payload: Value,
     pub config: Value,
     pub state: Value,
+    pub host: Value,
     pub data_dir: PathBuf,
     pub now_ms: i64,
     translations: Value,
@@ -29,14 +31,21 @@ pub struct Context {
 impl Context {
     #[must_use]
     pub fn new(parts: Parts, translations: Value) -> Self {
+        let now_ms = parts
+            .host
+            .get("now_ms")
+            .and_then(Value::as_i64)
+            .unwrap_or_else(now_ms);
+
         Self {
             entry: parts.entry,
             event: parts.event,
             payload: parts.payload,
             config: parts.config,
             state: parts.state,
+            host: parts.host,
             data_dir: parts.data_dir,
-            now_ms: now_ms(),
+            now_ms,
             translations,
         }
     }
@@ -88,7 +97,69 @@ impl Context {
         Ok(serde_json::from_value(value)?)
     }
 
+    #[inline]
     #[must_use]
+    pub fn host(&self, path: &str) -> Option<&Value> {
+        lookup(&self.host, path)
+    }
+
+    #[inline]
+    #[must_use]
+    pub fn setting(&self, path: &str) -> Option<&Value> {
+        self.host.get("setting")?.get(path)
+    }
+
+    #[inline]
+    #[must_use]
+    pub fn color(&self, role: &str) -> Option<&Value> {
+        self.host.get("colors")?.get(role)
+    }
+
+    #[inline]
+    #[must_use]
+    pub fn clipboard(&self) -> Option<&Value> {
+        self.host.get("clipboard")
+    }
+
+    #[inline]
+    #[must_use]
+    pub fn calendar(&self) -> Option<&Value> {
+        self.host.get("calendar")
+    }
+
+    #[inline]
+    #[must_use]
+    pub fn media(&self) -> Option<&Value> {
+        self.host.get("media")
+    }
+
+    #[inline]
+    #[must_use]
+    pub fn stats(&self) -> Option<&Value> {
+        self.host.get("stats")
+    }
+
+    #[inline]
+    #[must_use]
+    pub fn nightlight(&self) -> Option<&Value> {
+        self.host.get("nightlight")
+    }
+
+    #[inline]
+    #[must_use]
+    pub fn compositor(&self) -> Option<&Value> {
+        self.host.get("compositor")
+    }
+
+    #[inline]
+    #[must_use]
+    pub fn dark_mode(&self) -> bool {
+        self.host
+            .get("dark")
+            .and_then(Value::as_bool)
+            .unwrap_or_default()
+    }
+
     pub fn tr(&self, key: &str, params: &[(&str, String)]) -> String {
         let mut result = lookup(&self.translations, key)
             .and_then(Value::as_str)
@@ -125,8 +196,16 @@ mod tests {
             entry: "service".to_owned(),
             event: "update".to_owned(),
             payload: json!({ "args": ["10m"] }),
-            config: json!({ "enabled": true, "name": "Timed" }),
+            config: json!({ "enabled": true, "name": "Example" }),
             state: json!({ "timers": [1, 2, 3] }),
+            host: json!({
+                "now_ms": 42,
+                "dark": true,
+                "clipboard": "text",
+                "colors": { "primary": "#fff" },
+                "setting": { "shell.font_family": "sans" },
+                "compositor": "niri"
+            }),
             data_dir: PathBuf::from("/tmp/noctalia"),
         };
         let translations = json!({
@@ -136,10 +215,17 @@ mod tests {
     }
 
     #[test]
+    fn test_now_ms_reads_host_snapshot() {
+        let context = make_context();
+
+        assert_eq!(context.now_ms, 42);
+    }
+
+    #[test]
     fn test_config_str_reads_string_and_bool_values() {
         let context = make_context();
 
-        assert_eq!(context.config_str("name"), Some("Timed".to_owned()));
+        assert_eq!(context.config_str("name"), Some("Example".to_owned()));
         assert_eq!(context.config_str("enabled"), Some("true".to_owned()));
         assert_eq!(context.config_str("missing"), None);
     }
@@ -168,6 +254,18 @@ mod tests {
             context.state_value("timers").expect("valid timers");
 
         assert_eq!(timers, vec![1, 2, 3]);
+    }
+
+    #[test]
+    fn test_host_reads_expose_snapshot_values() {
+        let context = make_context();
+
+        assert_eq!(context.setting("shell.font_family"), Some(&json!("sans")));
+        assert_eq!(context.color("primary"), Some(&json!("#fff")));
+        assert_eq!(context.compositor(), Some(&json!("niri")));
+        assert_eq!(context.clipboard(), Some(&json!("text")));
+        assert!(context.dark_mode());
+        assert_eq!(context.calendar(), None);
     }
 
     #[test]

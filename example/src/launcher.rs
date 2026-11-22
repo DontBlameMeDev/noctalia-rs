@@ -1,3 +1,4 @@
+use noctalia::entry;
 use noctalia::{Context, Op, Result};
 use serde_json::{Value, json};
 
@@ -10,6 +11,7 @@ use super::{
 type ActionRows<'a> = (&'a str, &'a [timer::Timer], i64);
 type TimerRow<'a> = (&'a str, &'a timer::Timer, i64);
 
+#[entry(kind = "launcher", id = "launcher")]
 pub fn update(ctx: &Context) -> Result<Vec<Op>> {
     match ctx.event.as_str() {
         "query" => {
@@ -32,13 +34,13 @@ fn activate(ctx: &Context) -> Result<Vec<Op>> {
     } else if let Some((action, rest)) = id.split_once(':') {
         match action {
             "pause" => {
-                pause_by_id(ctx, &mut store, rest);
+                let _ = pause_by_id(ctx, &mut store, rest);
             }
             "resume" => {
-                resume_by_id(ctx, &mut store, rest);
+                let _ = resume_by_id(ctx, &mut store, rest);
             }
             "stop" => {
-                stop_by_id(&mut store, rest);
+                let _ = stop_by_id(&mut store, rest);
             }
             "start" => start(&mut store, ctx.now_ms, rest),
             _ => {}
@@ -193,4 +195,112 @@ fn empty_row(ctx: &Context) -> Value {
 fn row(parts: (&str, String, String, &str)) -> Value {
     let (id, title, subtitle, glyph) = parts;
     json!({ "id": id, "title": title, "subtitle": subtitle, "glyph": glyph })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use noctalia::{Parts, Value};
+    use serde_json::json;
+    use std::env;
+    use std::fs;
+    use std::path::PathBuf;
+    use std::process;
+
+    fn translations() -> Value {
+        json!({
+            "launcher": {
+                "start_new": "Start",
+                "hint": "Hint",
+                "no_matching": "Empty",
+                "stop_all": "Stop all",
+                "active_count": "{count} timers",
+                "invalid": "Invalid",
+                "start": "Start {time}",
+                "message": "{duration} - {message}",
+                "timer": "{duration} timer",
+                "paused_at": "Paused {duration}",
+                "ends_at": "Ends {duration}"
+            }
+        })
+    }
+
+    fn query_context(text: &str) -> Context {
+        Context::new(
+            Parts {
+                entry: "launcher".to_owned(),
+                event: "query".to_owned(),
+                payload: json!({ "text": text }),
+                config: json!({}),
+                state: json!({ "timers": [
+                    {
+                        "id": "one",
+                        "seconds": 600,
+                        "label": "10m",
+                        "message": null,
+                        "paused": false,
+                        "endsAt": 601_000
+                    },
+                    {
+                        "id": "two",
+                        "seconds": 300,
+                        "label": "5m",
+                        "message": null,
+                        "paused": true,
+                        "remainingMs": 120_000
+                    }
+                ]}),
+                host: json!({ "now_ms": 1_000 }),
+                data_dir: PathBuf::from("/tmp"),
+            },
+            translations(),
+        )
+    }
+
+    fn activate_context(id: &str, name: &str) -> Context {
+        let dir =
+            env::temp_dir().join(format!("launcher-{name}-{}", process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).expect("temp dir");
+
+        Context::new(
+            Parts {
+                entry: "launcher".to_owned(),
+                event: "activate".to_owned(),
+                payload: json!({ "id": id }),
+                config: json!({}),
+                state: json!({}),
+                host: json!({ "now_ms": 1_000 }),
+                data_dir: dir,
+            },
+            translations(),
+        )
+    }
+
+    #[test]
+    fn test_query_branches_produce_rows() {
+        for text in ["", "pause", "resume", "stop", "stop all", "5m", "bad"] {
+            let context = query_context(text);
+
+            let ops = update(&context).expect("ops");
+
+            assert!(matches!(ops[0], Op::LauncherResults { .. }), "{text}");
+        }
+    }
+
+    #[test]
+    fn test_activate_handles_all_actions() {
+        let context = activate_context("start:300:hello", "start");
+        update(&context).expect("start");
+
+        for (id, name) in [
+            ("pause:one", "pause"),
+            ("resume:one", "resume"),
+            ("stop:one", "stop"),
+            ("stop-all", "stopall"),
+        ] {
+            let context = activate_context(id, name);
+            update(&context).expect(name);
+        }
+    }
 }

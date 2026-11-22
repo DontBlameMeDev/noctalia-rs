@@ -1,3 +1,4 @@
+use noctalia::entry;
 use noctalia::{Context, Op, Result, ui};
 use serde_json::{Value, json};
 
@@ -8,6 +9,7 @@ use super::{
     timers_from_state,
 };
 
+#[entry(kind = "panel", id = "panel")]
 pub fn update(ctx: &Context) -> Result<Vec<Op>> {
     match ctx.event.as_str() {
         "action" => action(ctx),
@@ -27,12 +29,12 @@ fn action(ctx: &Context) -> Result<Vec<Op>> {
             .find(|timer| timer.id == id)
             .is_some_and(|timer| timer.paused);
         if paused {
-            resume_by_id(ctx, &mut store, id);
+            let _ = resume_by_id(ctx, &mut store, id);
         } else {
-            pause_by_id(ctx, &mut store, id);
+            let _ = pause_by_id(ctx, &mut store, id);
         }
     } else if let Some(id) = name.strip_prefix("stop:") {
-        stop_by_id(&mut store, id);
+        let _ = stop_by_id(&mut store, id);
     } else {
         match name.as_str() {
             "stop_all" => store.timers.clear(),
@@ -253,4 +255,95 @@ fn controls_row(ctx: &Context, draft: &str) -> ui::UiNode {
             })),
         ],
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use noctalia::{Parts, Value};
+    use std::env;
+    use std::fs;
+    use std::process;
+
+    fn translations() -> Value {
+        json!({
+            "panel": {
+                "title": "Panel",
+                "empty": "Empty",
+                "timer": "{duration} timer",
+                "ends_at": "Ends {time}",
+                "paused_left": "Paused",
+                "pause": "Pause",
+                "resume": "Resume",
+                "stop": "Stop",
+                "stop_all": "Stop all",
+                "placeholder": "Duration",
+                "start": "Start"
+            }
+        })
+    }
+
+    fn context(event: &str, payload: Value, name: &str) -> Context {
+        let dir =
+            env::temp_dir().join(format!("panel-{name}-{}", process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).expect("temp dir");
+
+        Context::new(
+            Parts {
+                entry: "panel".to_owned(),
+                event: event.to_owned(),
+                payload,
+                config: json!({}),
+                state: json!({ "timers": [
+                    {
+                        "id": "one",
+                        "seconds": 600,
+                        "label": "10m",
+                        "message": null,
+                        "paused": false,
+                        "endsAt": 601_000
+                    }
+                ]}),
+                host: json!({ "now_ms": 1_000 }),
+                data_dir: dir,
+            },
+            translations(),
+        )
+    }
+
+    #[test]
+    fn test_render_produces_panel_tree() {
+        let context = context("render", json!({}), "render");
+
+        let ops = update(&context).expect("ops");
+
+        assert!(matches!(ops[0], Op::PanelRender { .. }));
+    }
+
+    #[test]
+    fn test_close_returns_no_ops() {
+        let context = context("close", json!({}), "close");
+
+        let ops = update(&context).expect("ops");
+
+        assert!(ops.is_empty());
+    }
+
+    #[test]
+    fn test_actions_are_handled() {
+        for (name, payload) in [
+            ("stopall", json!({ "name": "stop_all" })),
+            ("draft", json!({ "name": "draft", "args": ["5m"] })),
+            ("start", json!({ "name": "start" })),
+            ("submit", json!({ "name": "submit", "args": ["10m"] })),
+            ("toggle", json!({ "name": "toggle:one" })),
+            ("stop", json!({ "name": "stop:one" })),
+            ("unknown", json!({ "name": "unknown" })),
+        ] {
+            let context = context("action", payload, name);
+            let ops = update(&context).expect(name);
+            assert_eq!(ops.len(), 1, "{name}");
+        }
+    }
 }

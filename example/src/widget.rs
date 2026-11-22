@@ -198,3 +198,141 @@ fn ring_path(ctx: &Context) -> PathBuf {
 fn temporary_path(ctx: &Context) -> PathBuf {
     ctx.data_dir.join("ring.svg.tmp")
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use noctalia::{Parts, Value};
+    use serde_json::json;
+    use std::env;
+    use std::fs;
+    use std::process;
+
+    fn context(event: &str, config: Value, state: Value) -> Context {
+        let dir =
+            env::temp_dir().join(format!("widget-{}-{event}", process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).expect("temp dir");
+
+        Context::new(
+            Parts {
+                entry: "widget".to_owned(),
+                event: event.to_owned(),
+                payload: json!({}),
+                config,
+                state,
+                host: json!({ "now_ms": 1_000 }),
+                data_dir: dir,
+            },
+            json!({
+                "bar": {
+                    "empty": "No timers",
+                    "timer": "{duration} timer",
+                    "paused": "Paused - {time}"
+                }
+            }),
+        )
+    }
+
+    fn config() -> Value {
+        json!({
+            "show_text": true,
+            "show_count": true,
+            "show_progress": true,
+            "hide_when_idle": false,
+            "use_urgency_colors": true,
+            "safe_color": "tertiary",
+            "warning_color": "secondary",
+            "urgent_color": "error",
+            "idle_color": "primary"
+        })
+    }
+
+    fn timers() -> Value {
+        json!({ "timers": [{
+            "id": "one",
+            "seconds": 600,
+            "label": "10m",
+            "message": null,
+            "paused": false,
+            "endsAt": 601_000
+        }]})
+    }
+
+    #[test]
+    fn test_click_toggles_panel() {
+        let context = context("click", config(), timers());
+
+        let ops = update(&context).expect("ops");
+
+        assert_eq!(ops.len(), 1);
+    }
+
+    #[test]
+    fn test_exit_removes_ring_files() {
+        let context = context("exit", config(), timers());
+
+        let ops = update(&context).expect("ops");
+
+        assert!(ops.is_empty());
+    }
+
+    #[test]
+    fn test_render_draws_ring_and_tooltip() {
+        let context = context("render", config(), timers());
+
+        let ops = update(&context).expect("ops");
+
+        assert!(ops.iter().any(|op| matches!(op, Op::BarImage { .. })));
+        assert!(ops.iter().any(|op| matches!(op, Op::BarTooltip { .. })));
+        assert!(context.data_dir.join("ring.svg").exists());
+    }
+
+    #[test]
+    fn test_render_hides_when_idle() {
+        let config = json!({
+            "show_text": true,
+            "show_count": true,
+            "show_progress": true,
+            "hide_when_idle": true,
+            "use_urgency_colors": true,
+            "safe_color": "tertiary",
+            "warning_color": "secondary",
+            "urgent_color": "error",
+            "idle_color": "primary"
+        });
+        let context = context("render", config, json!({ "timers": [] }));
+
+        let ops = update(&context).expect("ops");
+
+        assert!(
+            ops.iter()
+                .any(|op| matches!(op, Op::BarVisible { visible: false }))
+        );
+    }
+
+    #[test]
+    fn test_render_without_progress_or_text_uses_fallback_values() {
+        let config = json!({
+            "show_text": false,
+            "show_count": false,
+            "show_progress": false,
+            "hide_when_idle": false,
+            "use_urgency_colors": false,
+            "safe_color": "tertiary",
+            "warning_color": "secondary",
+            "urgent_color": "error",
+            "idle_color": "primary"
+        });
+        let context = context("render", config, timers());
+
+        let ops = update(&context).expect("ops");
+
+        assert!(!ops.iter().any(|op| matches!(op, Op::BarImage { .. })));
+        assert!(
+            ops.iter().any(
+                |op| matches!(op, Op::BarText { text } if text.is_empty())
+            )
+        );
+    }
+}

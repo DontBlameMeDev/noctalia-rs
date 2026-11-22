@@ -189,4 +189,68 @@ mod tests {
 
         assert_eq!(next_interval_ms(&store, 0), 60_050);
     }
+
+    #[test]
+    fn test_save_and_load_roundtrip() {
+        use noctalia::Parts;
+        use serde_json::json;
+        use std::env;
+        use std::fs;
+        use std::process;
+
+        let dir = env::temp_dir().join(format!("timers-{}", process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).expect("temp dir");
+        let context = Context::new(
+            Parts {
+                entry: "service".to_owned(),
+                event: "update".to_owned(),
+                payload: json!({}),
+                config: json!({}),
+                state: json!({}),
+                host: json!({}),
+                data_dir: dir.clone(),
+            },
+            json!({}),
+        );
+        let store = Store {
+            timers: vec![running_timer(60)],
+            seq: 3,
+            draft: "5m".to_owned(),
+        };
+
+        save(&context, &store).expect("save");
+        let loaded = load(&context);
+
+        assert_eq!(loaded.seq, 3);
+        assert_eq!(loaded.draft, "5m");
+        assert_eq!(loaded.timers.len(), 1);
+        fs::remove_dir_all(dir).expect("cleanup");
+    }
+
+    #[test]
+    fn test_paused_timer_keeps_remaining_ms() {
+        let mut timer = running_timer(60);
+        timer.paused = true;
+        timer.ends_at = None;
+        timer.remaining_ms = Some(12_345);
+
+        assert_eq!(timer.remaining_ms(0), 12_345);
+    }
+
+    #[test]
+    fn test_sort_places_running_timers_before_paused() {
+        let mut paused = running_timer(60);
+        paused.paused = true;
+        paused.ends_at = None;
+        paused.remaining_ms = Some(1_000);
+        let mut store = Store {
+            timers: vec![paused, running_timer(30)],
+            ..Store::default()
+        };
+
+        sort(&mut store);
+
+        assert!(!store.timers[0].paused);
+    }
 }

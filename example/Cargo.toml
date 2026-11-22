@@ -1,11 +1,10 @@
 [package]
-name                 = "noctalia-rs"
+name                 = "noctalia-example"
 version.workspace    = true
-repository.workspace = true
 edition.workspace    = true
 license.workspace    = true
-description          = "Unofficial Rust builder for Noctalia plugins"
-readme               = "../../README.md"
+description          = "Example Noctalia plugin written with noctalia"
+publish              = false
 
 [dependencies]
 noctalia.workspace   = true
