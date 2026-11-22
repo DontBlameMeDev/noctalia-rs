@@ -4,6 +4,7 @@
 [![Forks](https://img.shields.io/gitea/forks/DontBlameMe/noctalia_rs?gitea_url=https%3A%2F%2Fcodeberg.org&style=for-the-badge&labelColor=%231e1e2e&color=%2394e2d5)](https://codeberg.org/DontBlameMe/noctalia_rs/forks)
 [![Latest Update](https://img.shields.io/gitea/last-commit/DontBlameMe/noctalia_rs?gitea_url=https%3A%2F%2Fcodeberg.org&include_prereleases&display_name=tag&style=for-the-badge&label=Latest+Update&labelColor=%231e1e2e&color=%23cba6f7)](https://codeberg.org/DontBlameMe/noctalia_rs)
 [![NoGithub](https://img.shields.io/badge/Github-No-static?style=for-the-badge&labelColor=%231e1e2e&color=%23f38ba8)](https://nogithub.codeberg.page)
+Unofficial project. It is not maintained by or affiliated with the Noctalia team.
 
 Write Noctalia plugins in Rust. The crate generates `plugin.toml`, the Luau
 entry stubs, the shared bridge, and translations. Plugin logic stays in Rust.
