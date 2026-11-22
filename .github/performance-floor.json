@@ -1,0 +1,162 @@
+{
+  "version": 1,
+  "method": 1,
+  "metrics": {
+    "fresh_process_dispatch": {
+      "sha": "7894ae39112041b23ecd08071407cd012c351448",
+      "method": 1,
+      "medianMs": 0.479273,
+      "worstMedianMs": 0.4853584999999999,
+      "p95Ms": 0.525864,
+      "worstP95Ms": 0.545051,
+      "p99Ms": 0.641485,
+      "worstP99Ms": 0.696242,
+      "budgetMs": 20,
+      "updatedAt": "2026-11-22T22:58:58.123Z"
+    },
+    "spool_dispatch": {
+      "sha": "7894ae39112041b23ecd08071407cd012c351448",
+      "method": 1,
+      "medianMs": 1.0867170000000002,
+      "worstMedianMs": 1.089861,
+      "p95Ms": 1.0973730000000002,
+      "worstP95Ms": 1.104003,
+      "p99Ms": 1.110271,
+      "worstP99Ms": 1.159088,
+      "budgetMs": 10,
+      "updatedAt": "2026-11-22T22:58:58.123Z"
+    },
+    "luau_vm_creation": {
+      "sha": "7894ae39112041b23ecd08071407cd012c351448",
+      "method": 1,
+      "medianMs": 0.1157295,
+      "worstMedianMs": 0.1171395,
+      "p95Ms": 0.14303100000000002,
+      "worstP95Ms": 0.147698,
+      "p99Ms": 0.150871,
+      "worstP99Ms": 0.24536700000000003,
+      "budgetMs": 5,
+      "updatedAt": "2026-11-22T22:58:58.123Z"
+    },
+    "luau_vm_cache_reuse": {
+      "sha": "7894ae39112041b23ecd08071407cd012c351448",
+      "method": 1,
+      "medianMs": 0.002665,
+      "worstMedianMs": 0.002684,
+      "p95Ms": 0.002779,
+      "worstP95Ms": 0.002835,
+      "p99Ms": 0.003031,
+      "worstP99Ms": 0.0030729999999999998,
+      "budgetMs": 1,
+      "updatedAt": "2026-11-22T22:58:58.123Z"
+    },
+    "luau_runtime_dispatch": {
+      "sha": "7894ae39112041b23ecd08071407cd012c351448",
+      "method": 1,
+      "medianMs": 0.0053714999999999995,
+      "worstMedianMs": 0.005523500000000001,
+      "p95Ms": 0.006677,
+      "worstP95Ms": 0.0069240000000000005,
+      "p99Ms": 0.007017,
+      "worstP99Ms": 0.010199,
+      "budgetMs": 2,
+      "updatedAt": "2026-11-22T22:58:58.123Z"
+    },
+    "json_roundtrip_luau": {
+      "sha": "7894ae39112041b23ecd08071407cd012c351448",
+      "method": 1,
+      "medianMs": 0.008596,
+      "worstMedianMs": 0.008800999999999998,
+      "p95Ms": 0.010249,
+      "worstP95Ms": 0.010546000000000002,
+      "p99Ms": 0.011287,
+      "worstP99Ms": 0.029342000000000003,
+      "budgetMs": 2,
+      "updatedAt": "2026-11-22T22:58:58.123Z"
+    },
+    "bridge_snapshot_reads": {
+      "sha": "7894ae39112041b23ecd08071407cd012c351448",
+      "method": 1,
+      "medianMs": 0.020033500000000003,
+      "worstMedianMs": 0.020206,
+      "p95Ms": 0.022581,
+      "worstP95Ms": 0.023372,
+      "p99Ms": 0.035317,
+      "worstP99Ms": 0.040902,
+      "budgetMs": 5,
+      "updatedAt": "2026-11-22T22:58:58.123Z"
+    },
+    "json_encode_rust": {
+      "sha": "7894ae39112041b23ecd08071407cd012c351448",
+      "method": 1,
+      "medianMs": 0.000296,
+      "worstMedianMs": 0.00035,
+      "p95Ms": 0.000336,
+      "worstP95Ms": 0.000418,
+      "p99Ms": 0.000344,
+      "worstP99Ms": 0.00045200000000000004,
+      "budgetMs": 1,
+      "updatedAt": "2026-11-22T22:58:58.123Z"
+    },
+    "json_decode_rust": {
+      "sha": "7894ae39112041b23ecd08071407cd012c351448",
+      "method": 1,
+      "medianMs": 0.001104,
+      "worstMedianMs": 0.001128,
+      "p95Ms": 0.0011799999999999998,
+      "worstP95Ms": 0.001204,
+      "p99Ms": 0.001185,
+      "worstP99Ms": 0.001263,
+      "budgetMs": 1,
+      "updatedAt": "2026-11-22T22:58:58.123Z"
+    },
+    "snapshot_reads_rust": {
+      "sha": "7894ae39112041b23ecd08071407cd012c351448",
+      "method": 1,
+      "medianMs": 0.0009574999999999999,
+      "worstMedianMs": 0.0009910000000000001,
+      "p95Ms": 0.001014,
+      "worstP95Ms": 0.0010400000000000001,
+      "p99Ms": 0.001031,
+      "worstP99Ms": 0.001082,
+      "budgetMs": 1,
+      "updatedAt": "2026-11-22T22:58:58.123Z"
+    },
+    "snapshot_reads_luau": {
+      "sha": "7894ae39112041b23ecd08071407cd012c351448",
+      "method": 1,
+      "medianMs": 0.005845499999999999,
+      "worstMedianMs": 0.0059299999999999995,
+      "p95Ms": 0.005999,
+      "worstP95Ms": 0.007409,
+      "p99Ms": 0.007279999999999999,
+      "worstP99Ms": 0.020638999999999998,
+      "budgetMs": 2,
+      "updatedAt": "2026-11-22T22:58:58.123Z"
+    },
+    "codegen_generate": {
+      "sha": "7894ae39112041b23ecd08071407cd012c351448",
+      "method": 1,
+      "medianMs": 0.18915800000000002,
+      "worstMedianMs": 0.210404,
+      "p95Ms": 0.208929,
+      "worstP95Ms": 0.251723,
+      "p99Ms": 0.208929,
+      "worstP99Ms": 0.251723,
+      "budgetMs": 10,
+      "updatedAt": "2026-11-22T22:58:58.123Z"
+    },
+    "build_incremental_release": {
+      "sha": "7894ae39112041b23ecd08071407cd012c351448",
+      "method": 1,
+      "medianMs": 94.2210875,
+      "worstMedianMs": 98.7873345,
+      "p95Ms": 96.459803,
+      "worstP95Ms": 100.12305599999999,
+      "p99Ms": 96.459803,
+      "worstP99Ms": 100.12305599999999,
+      "budgetMs": 120000,
+      "updatedAt": "2026-11-22T22:58:58.123Z"
+    }
+  }
+}
