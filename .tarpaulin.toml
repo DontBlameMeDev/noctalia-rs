@@ -1,2 +1,8 @@
 [test_config]
-exclude-files = ["crates/bin/src/main.rs", "crates/lib/src/lib.rs"]
+exclude-files = [
+  "crates/bin/src/main.rs",
+  "crates/bench/*",
+  "crates/lib/src/lib.rs",
+  "crates/build/*",
+  "template/*",
+]

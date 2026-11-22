@@ -9,9 +9,13 @@ keywords             = ["noctalia", "luau", "plugin", "shell", "framework"]
 categories           = ["development-tools"]
 
 [dependencies]
+chrono.workspace          = true
 noctalia-macros.workspace = true
 serde.workspace           = true
 serde_json.workspace      = true
+
+[dev-dependencies]
+toml = "0.8.2"
 
 [lints]
 workspace = true

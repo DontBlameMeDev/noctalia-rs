@@ -27,6 +27,8 @@ pub struct Meta {
     pub description: String,
     pub tags: Vec<String>,
     pub icon: String,
+    pub dependencies: Vec<String>,
+    pub deprecated: bool,
 }
 
 impl Meta {
@@ -43,6 +45,8 @@ impl Meta {
             description: String::new(),
             tags: Vec::new(),
             icon: String::new(),
+            dependencies: Vec::new(),
+            deprecated: false,
         }
     }
 
@@ -78,6 +82,28 @@ impl Meta {
     #[must_use]
     pub fn icon(mut self, value: &str) -> Self {
         value.clone_into(&mut self.icon);
+        self
+    }
+
+    #[inline]
+    #[must_use]
+    pub fn license(mut self, value: &str) -> Self {
+        value.clone_into(&mut self.license);
+        self
+    }
+
+    #[inline]
+    #[must_use]
+    pub fn dependencies(mut self, values: &[&str]) -> Self {
+        self.dependencies =
+            values.iter().map(|value| (*value).to_owned()).collect();
+        self
+    }
+
+    #[inline]
+    #[must_use]
+    pub const fn deprecated(mut self, value: bool) -> Self {
+        self.deprecated = value;
         self
     }
 }
@@ -172,6 +198,27 @@ impl<S> MetaBuilder<S> {
         self.meta = self.meta.icon(value);
         self
     }
+
+    #[inline]
+    #[must_use]
+    pub fn license(mut self, value: &str) -> Self {
+        self.meta = self.meta.license(value);
+        self
+    }
+
+    #[inline]
+    #[must_use]
+    pub fn dependencies(mut self, values: &[&str]) -> Self {
+        self.meta = self.meta.dependencies(values);
+        self
+    }
+
+    #[inline]
+    #[must_use]
+    pub fn deprecated(mut self, value: bool) -> Self {
+        self.meta = self.meta.deprecated(value);
+        self
+    }
 }
 
 impl MetaBuilder<MetaReady> {
@@ -196,6 +243,11 @@ pub struct LayerConfig {
     pub visible: bool,
     pub keyboard: String,
     pub output: String,
+    pub click_through: Option<bool>,
+    pub exclusive_zone: Option<i32>,
+    pub margins: BTreeMap<String, i32>,
+    pub width: Option<u32>,
+    pub height: Option<u32>,
 }
 
 impl Default for LayerConfig {
@@ -207,6 +259,11 @@ impl Default for LayerConfig {
             visible: false,
             keyboard: "none".to_owned(),
             output: "all".to_owned(),
+            click_through: None,
+            exclusive_zone: None,
+            margins: BTreeMap::new(),
+            width: None,
+            height: None,
         }
     }
 }
@@ -252,6 +309,44 @@ impl LayerConfig {
         value.clone_into(&mut self.output);
         self
     }
+
+    #[inline]
+    #[must_use]
+    pub const fn click_through(mut self, value: bool) -> Self {
+        self.click_through = Some(value);
+        self
+    }
+
+    #[inline]
+    #[must_use]
+    pub const fn exclusive_zone(mut self, value: i32) -> Self {
+        self.exclusive_zone = Some(value);
+        self
+    }
+
+    #[inline]
+    #[must_use]
+    pub fn margins(mut self, values: &[(&str, i32)]) -> Self {
+        self.margins = values
+            .iter()
+            .map(|(key, value)| ((*key).to_owned(), *value))
+            .collect();
+        self
+    }
+
+    #[inline]
+    #[must_use]
+    pub const fn width(mut self, value: u32) -> Self {
+        self.width = Some(value);
+        self
+    }
+
+    #[inline]
+    #[must_use]
+    pub const fn height(mut self, value: u32) -> Self {
+        self.height = Some(value);
+        self
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -263,6 +358,206 @@ pub enum EntryKind {
     DesktopWidget,
     Panel { width: u32, height: u32 },
     Layer { config: LayerConfig },
+}
+#[derive(Clone, Debug)]
+pub struct LauncherCategory {
+    pub label: String,
+    pub glyph: String,
+}
+
+impl LauncherCategory {
+    #[inline]
+    #[must_use]
+    pub fn new(label: &str, glyph: &str) -> Self {
+        Self {
+            label: label.to_owned(),
+            glyph: glyph.to_owned(),
+        }
+    }
+}
+
+#[derive(Clone, Debug, Default)]
+pub struct EntryConfig {
+    pub actions: Vec<String>,
+    pub hover_highlight: Option<bool>,
+    pub placement: Option<String>,
+    pub position: Option<String>,
+    pub open_near_click: Option<bool>,
+    pub dismiss_on_outside_click: Option<bool>,
+    pub keyboard_focus: Option<bool>,
+    pub max_height: Option<u32>,
+    pub capture_keys: Option<bool>,
+    pub persistent: Option<bool>,
+    pub include_in_global_search: Option<bool>,
+    pub debounce_ms: Option<u32>,
+    pub category: Option<String>,
+    pub script: Option<String>,
+    pub action_map: BTreeMap<String, String>,
+    pub keyboard_focus_text: Option<String>,
+    pub capture_keys_list: Vec<String>,
+    pub categories: Vec<LauncherCategory>,
+    pub width_text: Option<String>,
+    pub height_text: Option<String>,
+    pub panel_layer: Option<String>,
+}
+
+impl EntryConfig {
+    #[inline]
+    #[must_use]
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    #[inline]
+    #[must_use]
+    pub fn actions(mut self, values: &[&str]) -> Self {
+        self.actions = values.iter().map(|value| (*value).to_owned()).collect();
+        self
+    }
+
+    #[inline]
+    #[must_use]
+    pub const fn hover_highlight(mut self, value: bool) -> Self {
+        self.hover_highlight = Some(value);
+        self
+    }
+
+    #[inline]
+    #[must_use]
+    pub fn placement(mut self, value: &str) -> Self {
+        self.placement = Some(value.to_owned());
+        self
+    }
+
+    #[inline]
+    #[must_use]
+    pub fn position(mut self, value: &str) -> Self {
+        self.position = Some(value.to_owned());
+        self
+    }
+
+    #[inline]
+    #[must_use]
+    pub const fn open_near_click(mut self, value: bool) -> Self {
+        self.open_near_click = Some(value);
+        self
+    }
+
+    #[inline]
+    #[must_use]
+    pub const fn dismiss_on_outside_click(mut self, value: bool) -> Self {
+        self.dismiss_on_outside_click = Some(value);
+        self
+    }
+
+    #[inline]
+    #[must_use]
+    pub const fn keyboard_focus(mut self, value: bool) -> Self {
+        self.keyboard_focus = Some(value);
+        self
+    }
+
+    #[inline]
+    #[must_use]
+    pub const fn max_height(mut self, value: u32) -> Self {
+        self.max_height = Some(value);
+        self
+    }
+
+    #[inline]
+    #[must_use]
+    pub const fn capture_keys(mut self, value: bool) -> Self {
+        self.capture_keys = Some(value);
+        self
+    }
+
+    #[inline]
+    #[must_use]
+    pub const fn persistent(mut self, value: bool) -> Self {
+        self.persistent = Some(value);
+        self
+    }
+
+    #[inline]
+    #[must_use]
+    pub const fn include_in_global_search(mut self, value: bool) -> Self {
+        self.include_in_global_search = Some(value);
+        self
+    }
+
+    #[inline]
+    #[must_use]
+    pub const fn debounce_ms(mut self, value: u32) -> Self {
+        self.debounce_ms = Some(value);
+        self
+    }
+
+    #[inline]
+    #[must_use]
+    pub fn category(mut self, value: &str) -> Self {
+        self.category = Some(value.to_owned());
+        self
+    }
+
+    #[inline]
+    #[must_use]
+    pub fn script(mut self, value: &str) -> Self {
+        self.script = Some(value.to_owned());
+        self
+    }
+
+    #[inline]
+    #[must_use]
+    pub fn action_map(mut self, values: &[(&str, &str)]) -> Self {
+        self.action_map = values
+            .iter()
+            .map(|(key, value)| ((*key).to_owned(), (*value).to_owned()))
+            .collect();
+        self
+    }
+
+    #[inline]
+    #[must_use]
+    pub fn keyboard_focus_text(mut self, value: &str) -> Self {
+        self.keyboard_focus_text = Some(value.to_owned());
+        self
+    }
+
+    #[inline]
+    #[must_use]
+    pub fn capture_keys_list(mut self, values: &[&str]) -> Self {
+        self.capture_keys_list =
+            values.iter().map(|value| (*value).to_owned()).collect();
+        self
+    }
+
+    #[inline]
+    #[must_use]
+    pub fn categories(mut self, values: Vec<LauncherCategory>) -> Self {
+        self.categories = values;
+        self
+    }
+
+    #[inline]
+    #[must_use]
+    pub fn width_text(mut self, value: &str) -> Self {
+        self.width_text = Some(value.to_owned());
+        self
+    }
+
+    #[inline]
+    #[must_use]
+    pub fn height_text(mut self, value: &str) -> Self {
+        self.height_text = Some(value.to_owned());
+        self
+    }
+
+    #[inline]
+    #[must_use]
+    pub fn panel_layer(mut self, value: &str) -> Self {
+        self.panel_layer = Some(value.to_owned());
+        self
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -293,6 +588,8 @@ pub struct Setting {
     pub description_key: Option<String>,
     pub kind: SettingKind,
     pub visible_when: Option<(String, Vec<String>)>,
+    pub step: Option<f64>,
+    pub advanced: Option<bool>,
 }
 
 impl Setting {
@@ -416,6 +713,20 @@ impl Setting {
         self
     }
 
+    #[inline]
+    #[must_use]
+    pub const fn step(mut self, value: f64) -> Self {
+        self.step = Some(value);
+        self
+    }
+
+    #[inline]
+    #[must_use]
+    pub const fn advanced(mut self, value: bool) -> Self {
+        self.advanced = Some(value);
+        self
+    }
+
     fn new(key: &str, label_key: &str, kind: SettingKind) -> Self {
         Self {
             key: key.to_owned(),
@@ -423,6 +734,8 @@ impl Setting {
             description_key: None,
             kind,
             visible_when: None,
+            step: None,
+            advanced: None,
         }
     }
 }
@@ -432,6 +745,7 @@ pub struct Entry {
     pub id: String,
     pub kind: EntryKind,
     pub settings: Vec<Setting>,
+    pub config: EntryConfig,
     pub handler: Handler,
 }
 
@@ -443,10 +757,21 @@ impl Entry {
         handler: Handler,
     ) -> Self {
         let (id, kind, settings) = spec;
+        Self::configured((id, kind, settings, EntryConfig::new()), handler)
+    }
+
+    #[inline]
+    #[must_use]
+    pub fn configured(
+        spec: (String, EntryKind, Vec<Setting>, EntryConfig),
+        handler: Handler,
+    ) -> Self {
+        let (id, kind, settings, config) = spec;
         Self {
             id,
             kind,
             settings,
+            config,
             handler,
         }
     }
@@ -455,7 +780,10 @@ impl Entry {
 pub struct Plugin {
     pub meta: Meta,
     pub entries: Vec<Entry>,
+    pub settings: Vec<Setting>,
     pub translations: BTreeMap<String, String>,
+    pub assets: BTreeMap<String, Vec<u8>>,
+    pub translation_files: BTreeMap<String, String>,
 }
 
 impl Plugin {
@@ -465,7 +793,10 @@ impl Plugin {
         Self {
             meta,
             entries: Vec::new(),
+            settings: Vec::new(),
             translations: BTreeMap::new(),
+            assets: BTreeMap::new(),
+            translation_files: BTreeMap::new(),
         }
     }
 
@@ -563,8 +894,29 @@ impl Plugin {
 
     #[inline]
     #[must_use]
+    pub fn setting(mut self, setting: Setting) -> Self {
+        self.settings.push(setting);
+        self
+    }
+    #[inline]
+    #[must_use]
     pub fn tr(mut self, key: &str, value: &str) -> Self {
         self.translations.insert(key.to_owned(), value.to_owned());
+        self
+    }
+
+    #[inline]
+    #[must_use]
+    pub fn translation_file(mut self, language: &str, content: &str) -> Self {
+        self.translation_files
+            .insert(language.to_owned(), content.to_owned());
+        self
+    }
+
+    #[inline]
+    #[must_use]
+    pub fn asset(mut self, path: &str, content: &[u8]) -> Self {
+        self.assets.insert(path.to_owned(), content.to_vec());
         self
     }
 

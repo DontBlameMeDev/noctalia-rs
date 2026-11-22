@@ -1,0 +1,19 @@
+[package]
+name = "noctalia-bench"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Release performance harness for noctalia-rs"
+publish = false
+
+[[bin]]
+name = "noctalia-bench"
+path = "src/main.rs"
+
+[dependencies]
+chrono.workspace    = true
+noctalia.workspace  = true
+noctalia-build.workspace = true
+noctalia-luau.workspace  = true
+serde               = { workspace = true, features = ["derive"] }
+serde_json.workspace = true

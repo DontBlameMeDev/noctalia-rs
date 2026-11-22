@@ -207,10 +207,15 @@ mod tests {
     use std::env;
     use std::fs;
     use std::process;
+    use std::time::{SystemTime, UNIX_EPOCH};
 
     fn context(event: &str, config: Value, state: Value) -> Context {
-        let dir =
-            env::temp_dir().join(format!("widget-{}-{event}", process::id()));
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("time")
+            .as_nanos();
+        let dir = env::temp_dir()
+            .join(format!("widget-{}-{event}-{unique}", process::id()));
         let _ = fs::remove_dir_all(&dir);
         fs::create_dir_all(&dir).expect("temp dir");
 

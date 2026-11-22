@@ -2,54 +2,105 @@
 
 Unofficial project. It is not maintained by or affiliated with the Noctalia team.
 
-Write Noctalia plugins in Rust. The library generates `plugin.toml`, Luau entry
-stubs, the shared bridge, and translations. Plugin logic stays in Rust.
+Write Noctalia plugins in Rust. `noctalia.toml` describes the plugin. Rust
+handles behavior. The library emits `plugin.toml`, Luau entry stubs, the shared
+bridge, translations, and assets.
 
 ## Features
 
-- Plain or type-state metadata construction
-- `#[entry]` attribute macro for service, widget, shortcut, launcher, desktop
-  widget, panel, and layer entries
-- Typed ops for common host calls and a generic `HostCall` escape hatch for any
-  current or future host function
-- Host reads such as config, colors, clipboard, calendar, media, system stats,
-  compositor, and night light are available through `Context`
+- `noctalia.toml` as the source of truth for metadata, settings, and entries
+- Version taken from `Cargo.toml` through `CARGO_PKG_VERSION`
+- No Nix requirement; Nix packaging stays optional
 - All Noctalia setting types and entry kinds
-- Nix builder exported as `mkPlugin.${system}`
+- Plugin-wide and entry-scoped settings
+- Entry metadata for panels, launchers, widgets, and layers
+- Assets and extra translation files emitted into the plugin directory
+- Typed ops for common host calls and a generic `HostCall` escape hatch
+- Host reads through `Context`
 
-## Using the library
+## Cargo setup
 
 ```toml
 [dependencies]
 noctalia = "0.1"
-serde_json = "1.0.154"
+serde_json = "1.0"
+
+[build-dependencies]
+noctalia-build = "0.1"
 ```
+
+Add `build.rs`:
 
 ```rust
-use noctalia::{entry, run, Context, MetaBuilder, Op, Plugin, Result};
+use std::error::Error;
 
-#[entry(kind = "service", id = "service")]
-fn update(ctx: &Context) -> Result<Vec<Op>> {
-    Ok(vec![Op::log(format!("{} tick", ctx.event))])
-}
-
-fn main() {
-    let meta = MetaBuilder::new()
-        .id("me/hello")
-        .name("Hello")
-        .version("0.1.0")
-        .build();
-    let plugin = Plugin::new(meta).entry(update_entry());
-
-    std::process::exit(i32::from(run(&plugin).success()));
+fn main() -> Result<(), Box<dyn Error>> {
+    noctalia_build::generate()
 }
 ```
 
-`run` writes the plugin when called with `emit <dir> <helper>` and dispatches
-host callbacks otherwise. Generated entry scripts call the helper with
-`noctalia.runAsync`.
+Add `noctalia.toml`:
 
-## Building a plugin with Nix
+```toml
+id = "me/hello"
+name = "Hello"
+plugin_api = 57
+author = "Me"
+license = "MIT"
+description = "A Rust plugin"
+tags = ["rust"]
+icon = "sparkles"
+dependencies = []
+
+[[setting]]
+key = "message"
+type = "string"
+label_key = "settings.message.label"
+default = "Hello"
+
+[[service]]
+id = "service"
+entry = "service.luau"
+handler = "service"
+```
+
+Each entry names a handler function in your crate. The generated plugin takes
+its version from `Cargo.toml`.
+
+Write `src/main.rs`:
+
+```rust
+use std::process::ExitCode;
+
+use noctalia::{Context, Op, Result};
+
+include!(concat!(env!("OUT_DIR"), "/generated.rs"));
+
+fn service(ctx: &Context) -> Result<Vec<Op>> {
+    let message = ctx.config_str("message").unwrap_or_default();
+    let _ = serde_json::from_str::<serde_json::Value>("null")?;
+    Ok(vec![Op::set_interval(1000), Op::log(message)])
+}
+
+fn main() -> ExitCode {
+    noctalia::run(&plugin())
+}
+```
+
+Build and install:
+
+```sh
+cargo build --release
+mkdir dist
+cp target/release/my-plugin dist/my-helper
+./target/release/my-plugin emit dist my-helper
+```
+
+Add `dist` as a local plugin source in Noctalia and enable the plugin id.
+
+The `template/` crate in this workspace is a complete minimal example.
+
+## Optional Nix packaging
 
 ```nix
 {
@@ -67,20 +118,35 @@ host callbacks otherwise. Generated entry scripts call the helper with
         src = ./.;
         cargoLock.lockFile = ./Cargo.lock;
         package = "my-plugin";
-        helperName = "my-plugin-helper";
+        helperName = "my-helper";
       };
     };
 }
 ```
 
 Run `nix build --out-link dist`. The output is a Noctalia local plugin source.
+Nix only automates the build and helper placement. It is not required by the
+library.
 
-## Building the example
+## Parity checks
+
+`crates/lib/tests/parity.rs` checks that the generated API covers the setting
+types, entry kinds, and manifest fields used by community plugins. Without
+configuration it uses an embedded fixture. Set `NOCTALIA_PARITY_FIXTURES` to a
+checkout of a plugin collection to check every real manifest.
+
+## Performance harness
+
+Run all release benchmarks with:
 
 ```sh
-nix build --out-link dist
+cargo run --release -p noctalia-bench -- --samples 200 --warmup 20 --report bench.json
 ```
 
-Add `./dist` as a local plugin source in Noctalia and enable `iblameyou/example`.
-The example exercises all entry kinds, settings, typed ops, and generic host
-calls.
+The harness builds the template helper, then measures fresh-process dispatch,
+persistent spool dispatch, Luau VM creation and cache reuse, on-demand Luau
+dispatch, JSON encode and decode, snapshot reads, code generation, and an
+incremental release build. It prints machine metadata and median, p95, and p99
+per surface. Use `--build-samples` and `--build-warmup` for the build surfaces,
+`--helper` for an existing helper binary, and `--help` for all options. It uses
+its own scratch files and never reads the Noctalia config.

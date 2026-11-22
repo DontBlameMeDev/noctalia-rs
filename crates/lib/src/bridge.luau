@@ -4,13 +4,20 @@ local M = {}
 
 local BIN = noctalia.pluginDir() .. "/{{HELPER}}"
 local DATA_DIR = noctalia.pluginDataDir() or noctalia.pluginDir()
+local RUNTIME_ID = (tostring({}):gsub("[^%w_%-]", "_"))
+local SPOOL_DIR = DATA_DIR .. "/.noctalia-rs/spool"
+local REQUEST_DIR = nil
 local STATE_KEY = "{{PREFIX}}.state"
+
 
 local ROOTS = {
   noctalia = noctalia,
   barWidget = barWidget,
+  desktopWidget = desktopWidget,
+  shortcut = shortcut,
   panel = panel,
   launcher = launcher,
+  layer = layer,
   ui = ui,
 }
 
@@ -28,7 +35,15 @@ M.entry = "unknown"
 M.config = {}
 M.state = {}
 M.host = {}
+local function safeName(value)
+  return (tostring(value):gsub("[^%w_%.%-]", "_"))
+end
 M.last_query = nil
+
+local boot = nil
+local sequence = 0
+local pending = {}
+local stream_started = false
 
 local function materialize(value)
   if type(value) ~= "table" then
@@ -72,21 +87,42 @@ local function render_node(node)
   return ctor(props, children)
 end
 
+local function invoke(root, path, ...)
+  local value = root
+  for part in string.gmatch(path, "[^.]+") do
+    if type(value) ~= "table" then
+      return nil
+    end
+    value = value[part]
+  end
+  if type(value) ~= "function" then
+    return nil
+  end
+  local ok, result = pcall(value, ...)
+  if ok then
+    return result
+  end
+  return nil
+end
 local function snapshot()
   local host = {
-    now_ms = noctalia.nowMs(),
-    dark = noctalia.isDarkMode(),
-    outputs = noctalia.outputs(),
-    clipboard = noctalia.clipboardText(),
-    calendar = noctalia.calendarEvents(),
-    media = noctalia.mediaPlayer(),
-    stats = noctalia.systemStats(),
-    nightlight = noctalia.nightlight.state(),
-    compositor = noctalia.compositor.name(),
+    now_ms = invoke(noctalia, "nowMs") or 0,
+    dark = invoke(noctalia, "isDarkMode"),
+    outputs = invoke(noctalia, "outputs"),
+    clipboard = invoke(noctalia, "clipboardText"),
+    calendar = invoke(noctalia, "calendarEvents"),
+    media = invoke(noctalia, "mediaPlayer"),
+    stats = invoke(noctalia, "systemStats"),
+    nightlight = invoke(noctalia, "nightlight.state"),
+    compositor = invoke(noctalia, "compositor.name"),
+    bar = {
+      vertical = invoke(barWidget, "isVertical"),
+      output_name = invoke(barWidget, "outputName"),
+    },
     colors = {},
   }
   for _, role in ipairs(COLOR_ROLES) do
-    host.colors[role] = noctalia.getColor(role)
+    host.colors[role] = invoke(noctalia, "getColor", role)
   end
   return host
 end
@@ -148,42 +184,111 @@ local handlers = {
   end,
 }
 
+local function shellQuote(value)
+  return "'" .. tostring(value):gsub("'", "'\\''") .. "'"
+end
+
+local function writeRequest(request)
+  sequence += 1
+  local name = string.format("%012d", sequence)
+  local temporary = REQUEST_DIR .. "/" .. name .. ".pending"
+  local target = REQUEST_DIR .. "/" .. name .. ".json"
+  local ok, err = noctalia.writeFile(temporary, noctalia.json.encode(request))
+  if ok then
+    ok, err = noctalia.renameFile(temporary, target)
+  end
+  if not ok then
+    noctalia.removeFile(temporary)
+    noctalia.log("noctalia bridge: spool write failed: " .. tostring(err))
+  end
+end
+
+local function flushPending()
+  if not boot then
+    return
+  end
+  local queued = pending
+  pending = {}
+  for _, request in ipairs(queued) do
+    request.boot = boot
+    writeRequest(request)
+  end
+end
+
+local function onLine(line)
+  local ok, message = pcall(noctalia.json.decode, line)
+  if not ok or type(message) ~= "table" then
+    return
+  end
+  if message.control == "ready" then
+    boot = message.boot
+    REQUEST_DIR = message.spool or SPOOL_DIR
+    flushPending()
+    return
+  end
+  if message.control == "error" then
+    noctalia.log("noctalia bridge: " .. tostring(message.message))
+    return
+  end
+  if message.control ~= nil then
+    return
+  end
+  if type(message.op) ~= "string" then
+    return
+  end
+  local handler = handlers[message.op]
+  if handler then
+    handler(message)
+  end
+end
+
+local function startStream()
+  if stream_started then
+    return
+  end
+
+  if noctalia.mkdirAll then
+    noctalia.mkdirAll(SPOOL_DIR)
+  end
+  local command = shellQuote(BIN)
+    .. " serve "
+    .. shellQuote(DATA_DIR)
+    .. " "
+    .. shellQuote(SPOOL_DIR)
+  local loop = "while kill -0 \"$PPID\" 2>/dev/null; do "
+    .. command
+    .. "; sleep 0.2; done"
+  if noctalia.runStream(loop, onLine) then
+    stream_started = true
+  else
+    noctalia.log("noctalia bridge: could not start persistent helper")
+  end
+end
+
 function M.call(event, payload)
+  if not boot then startStream() end
   M.host = snapshot()
-  noctalia.runAsync({
-    BIN,
-    M.entry,
-    event,
-    DATA_DIR,
-    noctalia.json.encode(payload or {}),
-    noctalia.json.encode(M.config),
-    noctalia.json.encode(M.state),
-    noctalia.json.encode(M.host),
-  }, function(result)
-    if result.exitCode ~= 0 then
-      noctalia.log(result.stderr)
-      return
-    end
-    for line in string.gmatch(result.stdout, "[^\r\n]+") do
-      local ok, op = pcall(noctalia.json.decode, line)
-      if ok and type(op) == "table" and type(op.op) == "string" then
-        local handler = handlers[op.op]
-        if handler then
-          handler(op)
-        end
-      end
-    end
-  end)
+  table.insert(pending, {
+    entry = M.entry,
+    event = event,
+    payload = payload or {},
+    config = M.config,
+    state = M.state,
+    host = M.host,
+  })
+  flushPending()
 end
 
 function M.setup(entry, configKeys)
   M.entry = entry
+  SPOOL_DIR = DATA_DIR .. "/.noctalia-rs/spool/" .. safeName(entry) .. "-" .. RUNTIME_ID
   M.config = {}
   for _, key in ipairs(configKeys) do
     M.config[key] = noctalia.getConfig(key)
   end
   M.state = noctalia.state.get(STATE_KEY) or {}
   M.host = snapshot()
+  startStream()
 end
 
 function M.watch_state(rerender)

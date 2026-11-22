@@ -1,0 +1,18 @@
+[package]
+name = "noctalia-template"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+description = "Noctalia plugin template using noctalia.toml"
+publish = false
+
+[dependencies]
+noctalia.workspace = true
+noctalia-luau.workspace   = true
+serde_json.workspace = true
+
+[build-dependencies]
+noctalia-build.workspace = true
+
+[lints]
+workspace = true

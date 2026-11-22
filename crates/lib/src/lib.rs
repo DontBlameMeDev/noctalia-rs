@@ -12,8 +12,9 @@ use std::result::Result as StdResult;
 pub use cli::run;
 pub use context::{Context, Parts};
 pub use manifest::{
-    Entry, EntryKind, LayerConfig, Meta, MetaBuilder, MetaReady, NeedId,
-    NeedName, NeedVersion, NumberConfig, Plugin, Setting, SettingKind,
+    Entry, EntryConfig, EntryKind, LauncherCategory, LayerConfig, Meta,
+    MetaBuilder, MetaReady, NeedId, NeedName, NeedVersion, NumberConfig,
+    Plugin, Setting, SettingKind,
 };
 pub use noctalia_macros::entry;
 pub use ops::Op;

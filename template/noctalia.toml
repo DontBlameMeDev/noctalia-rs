@@ -1,0 +1,26 @@
+id = "iblameyou/template"
+name = "Noctalia Rs Template"
+plugin_api = 57
+author = "IBlameYou"
+license = "GPL-3.0-or-later"
+description = "Minimal Rust plugin driven by noctalia.toml"
+tags = ["template", "rust"]
+icon = "sparkles"
+dependencies = []
+
+[[setting]]
+key = "message"
+type = "string"
+label_key = "settings.message.label"
+description_key = "settings.message.description"
+default = "Hello from Rust"
+
+[[service]]
+id = "service"
+entry = "service.luau"
+handler = "service"
+
+[[widget]]
+id = "widget"
+entry = "widget.luau"
+handler = "widget"

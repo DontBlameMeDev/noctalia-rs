@@ -129,6 +129,49 @@ impl Op {
         };
         Self::host_call("noctalia", &["runAsync"], args)
     }
+    #[inline]
+    #[must_use]
+    pub fn run_stream(command: Value, callback_id: &str) -> Self {
+        Self::host_call(
+            "noctalia",
+            &["runStream"],
+            vec![command, callback(callback_id)],
+        )
+    }
+
+    #[inline]
+    #[must_use]
+    pub fn state_watch(key: &str, callback_id: &str) -> Self {
+        Self::host_call(
+            "noctalia",
+            &["state", "watch"],
+            vec![Value::String(key.to_owned()), callback(callback_id)],
+        )
+    }
+
+    #[inline]
+    #[must_use]
+    pub fn notify(title: &str, body: &str) -> Self {
+        Self::Notify {
+            title: title.to_owned(),
+            body: body.to_owned(),
+        }
+    }
+
+    #[inline]
+    #[must_use]
+    pub fn notify_error(title: &str, body: &str) -> Self {
+        Self::NotifyError {
+            title: title.to_owned(),
+            body: body.to_owned(),
+        }
+    }
+
+    #[inline]
+    #[must_use]
+    pub const fn set_interval(ms: u64) -> Self {
+        Self::SetInterval { ms }
+    }
 
     #[inline]
     #[must_use]
@@ -273,5 +316,35 @@ mod tests {
             .expect("serialize");
 
         assert_eq!(value["args"].as_array().expect("args").len(), 1);
+    }
+    #[test]
+    fn test_stream_and_watch_ops_use_host_callbacks() {
+        let stream = serde_json::to_value(Op::run_stream(
+            json!("niri msg --json event-stream"),
+            "line",
+        ))
+        .expect("serialize");
+        let watch =
+            serde_json::to_value(Op::state_watch("wm.workspaces", "changed"))
+                .expect("serialize");
+
+        assert_eq!(stream["path"], json!(["runStream"]));
+        assert_eq!(stream["args"][1], json!({ "__host_callback": "line" }));
+        assert_eq!(watch["path"], json!(["state", "watch"]));
+        assert_eq!(watch["args"][1], json!({ "__host_callback": "changed" }));
+    }
+
+    #[test]
+    fn test_notify_and_interval_ops() {
+        let notice = serde_json::to_value(Op::notify("Done", "Body"))
+            .expect("serialize");
+        let error = serde_json::to_value(Op::notify_error("Failed", "Body"))
+            .expect("serialize");
+        let interval =
+            serde_json::to_value(Op::set_interval(1000)).expect("serialize");
+
+        assert_eq!(notice["op"], json!("notify"));
+        assert_eq!(error["op"], json!("notify_error"));
+        assert_eq!(interval, json!({ "op": "set_interval", "ms": 1000 }));
     }
 }
