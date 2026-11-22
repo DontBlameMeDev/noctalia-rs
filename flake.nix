@@ -45,7 +45,12 @@
         craneLib =
           (crane.mkLib pkgs).overrideToolchain rustToolchain;
 
-        src = craneLib.cleanCargoSource ./.;
+        src = pkgs.lib.cleanSourceWith {
+          src = ./.;
+          filter = path: type:
+            craneLib.filterCargoSources path type
+            || builtins.match ".*\\.luau$" (toString path) != null;
+        };
 
         commonArgs = {
           inherit src;
@@ -59,6 +64,12 @@
           commonArgs
           // {
             inherit cargoArtifacts;
+
+            postInstall = ''
+              install -Dm755 "$out/bin/${binName}" "$out/${helperName}"
+              rm -f "$out/bin/${binName}"
+              "$out/${helperName}" emit "$out" "${helperName}"
+            '';
           }
         );
 
@@ -117,13 +128,16 @@
         binCargoPath = ./crates/bin/Cargo.toml;
         cargoToml = builtins.fromTOML (builtins.readFile binCargoPath);
         binName = cargoToml.package.name;
+        helperName = "timed-helper";
       in {
         formatter = pkgs.alejandra;
+        mkPlugin = args:
+          import ./nix/mkPlugin.nix ({ inherit pkgs; } // args);
         packages.default = package;
 
         apps.default = {
           type = "app";
-          program = "${package}/bin/${binName}";
+          program = "${package}/${helperName}";
         };
 
         checks = {
