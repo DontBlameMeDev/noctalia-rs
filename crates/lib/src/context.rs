@@ -67,7 +67,10 @@ impl Context {
         match self.payload.get(key)? {
             Value::String(value) => Some(value.clone()),
             Value::Number(value) => Some(value.to_string()),
-            Value::Bool(_) | Value::Array(_) | Value::Object(_) | Value::Null => None,
+            Value::Bool(_)
+            | Value::Array(_)
+            | Value::Object(_)
+            | Value::Null => None,
         }
     }
 
@@ -108,7 +111,8 @@ fn now_ms() -> i64 {
 }
 
 fn lookup<'a>(root: &'a Value, path: &str) -> Option<&'a Value> {
-    path.split('.').try_fold(root, |value, part| value.get(part))
+    path.split('.')
+        .try_fold(root, |value, part| value.get(part))
 }
 
 #[cfg(test)]
@@ -160,7 +164,8 @@ mod tests {
     fn test_state_value_deserializes_timers() {
         let context = make_context();
 
-        let timers: Vec<u32> = context.state_value("timers").expect("valid timers");
+        let timers: Vec<u32> =
+            context.state_value("timers").expect("valid timers");
 
         assert_eq!(timers, vec![1, 2, 3]);
     }

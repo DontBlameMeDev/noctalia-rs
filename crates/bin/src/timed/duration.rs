@@ -57,17 +57,18 @@ pub fn parse(input: &str) -> Option<u64> {
 
     while index < characters.len() {
         let start = index;
-        while characters
-            .get(index)
-            .is_some_and(char::is_ascii_digit)
-        {
+        while characters.get(index).is_some_and(char::is_ascii_digit) {
             index = index.saturating_add(1);
         }
         if start == index {
             return None;
         }
 
-        let digits: String = characters.iter().skip(start).take(index.saturating_sub(start)).collect();
+        let digits: String = characters
+            .iter()
+            .skip(start)
+            .take(index.saturating_sub(start))
+            .collect();
         let value: u64 = digits.parse().ok()?;
 
         let unit = match (characters.get(index), last) {

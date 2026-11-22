@@ -1,9 +1,11 @@
 use noctalia::{Context, Op, Result};
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 
 use super::duration;
 use super::timer;
-use super::{pause_by_id, publish, resume_by_id, stop_by_id, timers_from_state};
+use super::{
+    pause_by_id, publish, resume_by_id, stop_by_id, timers_from_state,
+};
 
 type ActionRows<'a> = (&'a str, &'a [timer::Timer], i64);
 type TimerRow<'a> = (&'a str, &'a timer::Timer, i64);
@@ -123,7 +125,10 @@ fn stop_all_rows(ctx: &Context, timers: &[timer::Timer]) -> Vec<Value> {
     vec![row((
         "stop-all",
         ctx.tr("launcher.stop_all", &[]),
-        ctx.tr("launcher.active_count", &[("count", timers.len().to_string())]),
+        ctx.tr(
+            "launcher.active_count",
+            &[("count", timers.len().to_string())],
+        ),
         "player-stop",
     ))]
 }
@@ -163,10 +168,9 @@ fn duration_row(ctx: &Context, query: &str) -> Vec<Value> {
 
 fn timer_row(ctx: &Context, spec: TimerRow<'_>) -> Value {
     let (action, timer, now) = spec;
-    let title = timer
-        .message
-        .clone()
-        .unwrap_or_else(|| ctx.tr("launcher.timer", &[("duration", timer.label.clone())]));
+    let title = timer.message.clone().unwrap_or_else(|| {
+        ctx.tr("launcher.timer", &[("duration", timer.label.clone())])
+    });
     let left = duration::approx(timer.remaining_ms(now).div_ceil(1_000));
     let subtitle = if timer.paused {
         ctx.tr("launcher.paused_at", &[("duration", left)])
@@ -174,12 +178,7 @@ fn timer_row(ctx: &Context, spec: TimerRow<'_>) -> Value {
         ctx.tr("launcher.ends_at", &[("duration", left)])
     };
 
-    row((
-        &format!("{action}:{}", timer.id),
-        title,
-        subtitle,
-        action,
-    ))
+    row((&format!("{action}:{}", timer.id), title, subtitle, action))
 }
 
 fn empty_row(ctx: &Context) -> Value {

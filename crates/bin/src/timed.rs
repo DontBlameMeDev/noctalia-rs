@@ -57,23 +57,50 @@ const TRANSLATIONS: &[(&str, &str)] = &[
     ("launcher.active_count", "{count} timers"),
     ("launcher.invalid", "Invalid duration"),
     ("settings.show_text.label", "Show time"),
-    ("settings.show_text.description", "Show the remaining time next to the ring."),
+    (
+        "settings.show_text.description",
+        "Show the remaining time next to the ring.",
+    ),
     ("settings.show_count.label", "Show count"),
-    ("settings.show_count.description", "Show the number of timers inside the ring."),
+    (
+        "settings.show_count.description",
+        "Show the number of timers inside the ring.",
+    ),
     ("settings.show_progress.label", "Show progress ring"),
-    ("settings.show_progress.description", "Draw a progress ring for the nearest timer."),
+    (
+        "settings.show_progress.description",
+        "Draw a progress ring for the nearest timer.",
+    ),
     ("settings.use_urgency_colors.label", "Timer colors"),
-    ("settings.use_urgency_colors.description", "Change color as the timer runs out."),
+    (
+        "settings.use_urgency_colors.description",
+        "Change color as the timer runs out.",
+    ),
     ("settings.safe_color.label", "Safe color"),
-    ("settings.safe_color.description", "Ring color while more than half remains."),
+    (
+        "settings.safe_color.description",
+        "Ring color while more than half remains.",
+    ),
     ("settings.warning_color.label", "Warning color"),
-    ("settings.warning_color.description", "Ring color when half or less remains."),
+    (
+        "settings.warning_color.description",
+        "Ring color when half or less remains.",
+    ),
     ("settings.urgent_color.label", "Urgent color"),
-    ("settings.urgent_color.description", "Ring color when a fifth or less remains."),
+    (
+        "settings.urgent_color.description",
+        "Ring color when a fifth or less remains.",
+    ),
     ("settings.idle_color.label", "Idle color"),
-    ("settings.idle_color.description", "Ring color when no timers are running."),
+    (
+        "settings.idle_color.description",
+        "Ring color when no timers are running.",
+    ),
     ("settings.hide_when_idle.label", "Hide when idle"),
-    ("settings.hide_when_idle.description", "Hide the widget when no timers are running."),
+    (
+        "settings.hide_when_idle.description",
+        "Hide the widget when no timers are running.",
+    ),
     ("settings.color.primary", "Primary"),
     ("settings.color.secondary", "Secondary"),
     ("settings.color.tertiary", "Tertiary"),
@@ -90,7 +117,10 @@ pub fn timers_from_state(ctx: &Context) -> Vec<Timer> {
     ctx.state_value("timers").unwrap_or_default()
 }
 
-pub fn add_timer(ctx: &Context, spec: (&mut Store, u64, Option<String>)) -> bool {
+pub fn add_timer(
+    ctx: &Context,
+    spec: (&mut Store, u64, Option<String>),
+) -> bool {
     let (store, seconds, message) = spec;
 
     if seconds == 0 {
@@ -179,8 +209,12 @@ fn settings() -> Vec<Setting> {
             .description("settings.show_progress.description"),
         Setting::bool("hide_when_idle", "settings.hide_when_idle.label", false)
             .description("settings.hide_when_idle.description"),
-        Setting::bool("use_urgency_colors", "settings.use_urgency_colors.label", true)
-            .description("settings.use_urgency_colors.description"),
+        Setting::bool(
+            "use_urgency_colors",
+            "settings.use_urgency_colors.label",
+            true,
+        )
+        .description("settings.use_urgency_colors.description"),
         Setting::select(
             "safe_color",
             "settings.safe_color.label",
@@ -216,7 +250,14 @@ fn build_plugin() -> Plugin {
             .author("DontBlameMe")
             .plugin_api(48)
             .description("Countdown timers written in Rust")
-            .tags(&["launcher", "bar", "panel", "service", "countdown", "utility"])
+            .tags(&[
+                "launcher",
+                "bar",
+                "panel",
+                "service",
+                "countdown",
+                "utility",
+            ])
             .icon("clock"),
     )
     .service("service", service::update)
@@ -234,4 +275,3 @@ fn build_plugin() -> Plugin {
 pub fn run() -> ExitCode {
     run_cli(&build_plugin())
 }
-

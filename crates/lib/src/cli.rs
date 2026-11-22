@@ -4,9 +4,9 @@ use std::process::ExitCode;
 
 use serde_json::Value;
 
+use crate::Result;
 use crate::context::{Context, Parts};
 use crate::manifest::Plugin;
-use crate::Result;
 
 #[must_use]
 pub fn run(plugin: &Plugin) -> ExitCode {
@@ -23,7 +23,8 @@ pub fn run(plugin: &Plugin) -> ExitCode {
 
 fn execute(plugin: &Plugin, args: &[String]) -> Result<()> {
     if args.first().is_some_and(|arg| arg == "emit") {
-        let dir = PathBuf::from(args.get(1).ok_or("usage: emit <dir> <helper>")?);
+        let dir =
+            PathBuf::from(args.get(1).ok_or("usage: emit <dir> <helper>")?);
         let helper = args.get(2).ok_or("usage: emit <dir> <helper>")?;
         plugin.emit(&dir, helper)?;
         return Ok(());
@@ -48,7 +49,8 @@ fn execute(plugin: &Plugin, args: &[String]) -> Result<()> {
 }
 
 fn decode(raw: Option<&String>) -> Value {
-    raw.map_or_else(|| Value::Null, |value| {
-        serde_json::from_str(value).unwrap_or_default()
-    })
+    raw.map_or_else(
+        || Value::Null,
+        |value| serde_json::from_str(value).unwrap_or_default(),
+    )
 }

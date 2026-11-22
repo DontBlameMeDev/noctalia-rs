@@ -1,9 +1,12 @@
-use noctalia::{ui, Context, Op, Result};
-use serde_json::{json, Value};
+use noctalia::{Context, Op, Result, ui};
+use serde_json::{Value, json};
 
 use super::duration;
 use super::timer;
-use super::{add_timer, pause_by_id, publish, resume_by_id, stop_by_id, timers_from_state};
+use super::{
+    add_timer, pause_by_id, publish, resume_by_id, stop_by_id,
+    timers_from_state,
+};
 
 pub fn update(ctx: &Context) -> Result<Vec<Op>> {
     match ctx.event.as_str() {
@@ -18,9 +21,11 @@ fn action(ctx: &Context) -> Result<Vec<Op>> {
     let name = ctx.payload_str("name").unwrap_or_default();
 
     if let Some(id) = name.strip_prefix("toggle:") {
-        let paused = store.timers.iter().find(|timer| timer.id == id).is_some_and(
-            |timer| timer.paused,
-        );
+        let paused = store
+            .timers
+            .iter()
+            .find(|timer| timer.id == id)
+            .is_some_and(|timer| timer.paused);
         if paused {
             resume_by_id(ctx, &mut store, id);
         } else {
@@ -71,7 +76,9 @@ fn arg_string(ctx: &Context, index: usize) -> Option<String> {
     match ctx.payload_arg(index)? {
         Value::String(value) => Some(value.clone()),
         Value::Number(value) => Some(value.to_string()),
-        Value::Bool(_) | Value::Array(_) | Value::Object(_) | Value::Null => None,
+        Value::Bool(_) | Value::Array(_) | Value::Object(_) | Value::Null => {
+            None
+        }
     }
 }
 
@@ -85,7 +92,8 @@ fn render(ctx: &Context) -> Vec<Op> {
         header_children(ctx, timers.len()),
     );
     let body = body(ctx, &timers, now);
-    let controls = ui::column(json!({ "gap": 6 }), vec![controls_row(ctx, &store.draft)]);
+    let controls =
+        ui::column(json!({ "gap": 6 }), vec![controls_row(ctx, &store.draft)]);
 
     let tree = ui::column(
         json!({ "gap": 12, "flexGrow": 1 }),
@@ -143,10 +151,9 @@ fn timer_row(ctx: &Context, timer: &timer::Timer, now: i64) -> ui::UiNode {
         "warning" => "secondary",
         _ => "tertiary",
     };
-    let title = timer
-        .message
-        .clone()
-        .unwrap_or_else(|| ctx.tr("panel.timer", &[("duration", timer.label.clone())]));
+    let title = timer.message.clone().unwrap_or_else(|| {
+        ctx.tr("panel.timer", &[("duration", timer.label.clone())])
+    });
     let subtitle = if timer.paused {
         ctx.tr("panel.paused_left", &[])
     } else {
@@ -208,7 +215,10 @@ fn timer_row(ctx: &Context, timer: &timer::Timer, now: i64) -> ui::UiNode {
     )
 }
 
-fn toggle_props(ctx: &Context, timer: &timer::Timer) -> (&'static str, String, String) {
+fn toggle_props(
+    ctx: &Context,
+    timer: &timer::Timer,
+) -> (&'static str, String, String) {
     if timer.paused {
         (
             "player-play",

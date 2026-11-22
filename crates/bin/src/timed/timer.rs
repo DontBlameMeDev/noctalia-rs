@@ -32,8 +32,9 @@ impl Timer {
             return self.remaining_ms.unwrap_or(0);
         }
 
-        self.ends_at
-            .map_or(0, |end| u64::try_from(end.saturating_sub(now)).unwrap_or(0))
+        self.ends_at.map_or(0, |end| {
+            u64::try_from(end.saturating_sub(now)).unwrap_or(0)
+        })
     }
 
     #[must_use]
@@ -94,15 +95,19 @@ pub fn save(ctx: &Context, store: &Store) -> Result<()> {
 }
 
 pub fn sort(store: &mut Store) {
-    store.timers.sort_by(|left, right| match (left.paused, right.paused) {
-        (false, true) => Ordering::Less,
-        (true, false) => Ordering::Greater,
-        (true, true) => left
-            .remaining_ms
-            .unwrap_or(0)
-            .cmp(&right.remaining_ms.unwrap_or(0)),
-        (false, false) => left.ends_at.unwrap_or(0).cmp(&right.ends_at.unwrap_or(0)),
-    });
+    store
+        .timers
+        .sort_by(|left, right| match (left.paused, right.paused) {
+            (false, true) => Ordering::Less,
+            (true, false) => Ordering::Greater,
+            (true, true) => left
+                .remaining_ms
+                .unwrap_or(0)
+                .cmp(&right.remaining_ms.unwrap_or(0)),
+            (false, false) => {
+                left.ends_at.unwrap_or(0).cmp(&right.ends_at.unwrap_or(0))
+            }
+        });
 }
 
 #[must_use]
@@ -117,7 +122,10 @@ pub fn next_interval_ms(store: &Store, now: i64) -> u64 {
         return u64::try_from(MAX_INTERVAL_MS).unwrap_or(86_400_000);
     };
 
-    let delay = ends_at.saturating_sub(now).saturating_add(50).clamp(100, MAX_INTERVAL_MS);
+    let delay = ends_at
+        .saturating_sub(now)
+        .saturating_add(50)
+        .clamp(100, MAX_INTERVAL_MS);
     u64::try_from(delay).unwrap_or(86_400_000)
 }
 

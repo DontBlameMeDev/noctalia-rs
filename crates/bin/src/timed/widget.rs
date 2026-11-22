@@ -2,12 +2,12 @@ use std::fs;
 use std::path::PathBuf;
 
 use noctalia::{Context, Op, Result};
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 
-use super::duration;
-use super::timers_from_state;
-use super::timer::Timer;
 use super::PANEL_ID;
+use super::duration;
+use super::timer::Timer;
+use super::timers_from_state;
 
 const CIRCUMFERENCE_X100: u64 = 10_053;
 type RoleSpec<'a> = (&'a str, &'a str, &'a str, &'a str, bool);
@@ -57,10 +57,18 @@ fn render(ctx: &Context) -> Result<Vec<Op>> {
     let show_progress = ctx.config_bool("show_progress", true);
     let hide_when_idle = ctx.config_bool("hide_when_idle", false);
     let use_urgency = ctx.config_bool("use_urgency_colors", true);
-    let safe = ctx.config_str("safe_color").unwrap_or_else(|| "tertiary".to_owned());
-    let warning = ctx.config_str("warning_color").unwrap_or_else(|| "secondary".to_owned());
-    let urgent = ctx.config_str("urgent_color").unwrap_or_else(|| "error".to_owned());
-    let idle = ctx.config_str("idle_color").unwrap_or_else(|| "primary".to_owned());
+    let safe = ctx
+        .config_str("safe_color")
+        .unwrap_or_else(|| "tertiary".to_owned());
+    let warning = ctx
+        .config_str("warning_color")
+        .unwrap_or_else(|| "secondary".to_owned());
+    let urgent = ctx
+        .config_str("urgent_color")
+        .unwrap_or_else(|| "error".to_owned());
+    let idle = ctx
+        .config_str("idle_color")
+        .unwrap_or_else(|| "primary".to_owned());
 
     if hide_when_idle && timers.is_empty() {
         return Ok(vec![
@@ -89,7 +97,9 @@ fn render(ctx: &Context) -> Result<Vec<Op>> {
 
     let text = if show_text {
         nearest
-            .map(|timer| duration::approx(timer.remaining_ms(now).div_ceil(1_000)))
+            .map(|timer| {
+                duration::approx(timer.remaining_ms(now).div_ceil(1_000))
+            })
             .unwrap_or_default()
     } else {
         String::new()

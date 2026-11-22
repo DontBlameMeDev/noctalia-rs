@@ -4,10 +4,10 @@ use std::path::Path;
 
 use serde_json::{Map, Value};
 
+use crate::Result;
 use crate::codegen;
 use crate::context::Context;
 use crate::ops::Op;
-use crate::Result;
 
 pub type Handler = fn(&Context) -> Result<Vec<Op>>;
 type SelectConfig<'a> = (&'a str, &'a [(&'a str, &'a str)]);
@@ -82,7 +82,10 @@ impl Meta {
 pub enum EntryKind {
     Service,
     Widget,
-    LauncherProvider { prefix: String, glyph: String },
+    LauncherProvider {
+        prefix: String,
+        glyph: String,
+    },
     Panel {
         width: u32,
         height: u32,
@@ -309,7 +312,11 @@ impl Plugin {
     }
 }
 
-fn insert_translation(root: &mut Map<String, Value>, parts: &[&str], value: &str) {
+fn insert_translation(
+    root: &mut Map<String, Value>,
+    parts: &[&str],
+    value: &str,
+) {
     let Some((last, parents)) = parts.split_last() else {
         return;
     };
