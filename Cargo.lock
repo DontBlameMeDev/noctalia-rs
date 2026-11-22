@@ -27,6 +27,7 @@ name = "noctalia-rs"
 version = "0.1.0"
 dependencies = [
  "noctalia",
+ "serde",
  "serde_json",
 ]
 
