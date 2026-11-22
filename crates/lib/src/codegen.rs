@@ -13,8 +13,12 @@ pub fn emit(plugin: &Plugin, dir: &Path, helper: &str) -> io::Result<()> {
     fs::write(dir.join("plugin.toml"), manifest(plugin))?;
 
     let translations =
-        serde_json::to_string_pretty(&plugin.translations_value()).map_err(io::Error::other)?;
-    fs::write(dir.join("translations/en.json"), format!("{translations}\n"))?;
+        serde_json::to_string_pretty(&plugin.translations_value())
+            .map_err(io::Error::other)?;
+    fs::write(
+        dir.join("translations/en.json"),
+        format!("{translations}\n"),
+    )?;
 
     let bridge = SOURCE
         .replace("{{HELPER}}", helper)
@@ -129,28 +133,8 @@ fn write_widget_setting(out: &mut String, setting: &Setting) {
         "\n  [[widget.setting]]\nkey = {}\n",
         quote(&setting.key)
     );
-
-    match &setting.kind {
-        SettingKind::Bool(value) => {
-            let _ = write!(out, "type = \"bool\"\ndefault = {value}\n");
-        }
-        SettingKind::String(value) => {
-            let _ = write!(out, "type = \"string\"\ndefault = {}\n", quote(value));
-        }
-        SettingKind::Select { default, options } => {
-            let _ = write!(out, "type = \"select\"\ndefault = {}\n", quote(default));
-            for (value, label_key) in options {
-                let _ = write!(
-                    out,
-                    "\n  [[widget.setting.options]]\nvalue = {}\nlabel_key = {}\n",
-                    quote(value),
-                    quote(label_key)
-                );
-            }
-        }
-    }
-
     let _ = writeln!(out, "label_key = {}", quote(&setting.label_key));
+
     if let Some(key) = &setting.description_key {
         let _ = writeln!(out, "description_key = {}", quote(key));
     }
@@ -161,6 +145,31 @@ fn write_widget_setting(out: &mut String, setting: &Setting) {
             quote(key),
             toml_list(values)
         );
+    }
+
+    match &setting.kind {
+        SettingKind::Bool(value) => {
+            let _ = write!(out, "type = \"bool\"\ndefault = {value}\n");
+        }
+        SettingKind::String(value) => {
+            let _ =
+                write!(out, "type = \"string\"\ndefault = {}\n", quote(value));
+        }
+        SettingKind::Select { default, options } => {
+            let _ = write!(
+                out,
+                "type = \"select\"\ndefault = {}\n",
+                quote(default)
+            );
+            for (value, label_key) in options {
+                let _ = write!(
+                    out,
+                    "\n  [[widget.setting.options]]\nvalue = {}\nlabel_key = {}\n",
+                    quote(value),
+                    quote(label_key)
+                );
+            }
+        }
     }
 }
 
@@ -192,23 +201,59 @@ fn entry_script(entry: &Entry) -> String {
             out.push_str("function update() bridge.call(\"render\") end\n");
             out.push_str("function onClick() bridge.call(\"click\") end\n");
             out.push_str("function onExit() bridge.call(\"exit\") end\n");
-            out.push_str("bridge.watch_state(function() bridge.call(\"render\") end)\n");
+            out.push_str(
+                "bridge.watch_state(function() bridge.call(\"render\") end)\n",
+            );
             out.push_str("bridge.call(\"render\")\n");
         }
         EntryKind::LauncherProvider { .. } => {
             out.push_str("function onQuery(text) bridge.query(text) end\n");
             out.push_str("function onActivate(id) bridge.call(\"activate\", { id = id }) end\n");
-            out.push_str("bridge.watch_state(function() bridge.rerender_query() end)\n");
+            out.push_str(
+                "bridge.watch_state(function() bridge.rerender_query() end)\n",
+            );
         }
         EntryKind::Panel { .. } => {
             out.push_str("function onOpen() bridge.call(\"open\") end\n");
             out.push_str("function onClose() bridge.call(\"close\") end\n");
             out.push_str("function update() bridge.call(\"render\") end\n");
-            out.push_str("bridge.watch_state(function() bridge.call(\"render\") end)\n");
+            out.push_str(
+                "bridge.watch_state(function() bridge.call(\"render\") end)\n",
+            );
             out.push_str("panel.setWantsSecondTicks(true)\n");
             out.push_str("bridge.call(\"render\")\n");
         }
     }
 
     out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::manifest::Meta;
+
+    #[test]
+    fn test_manifest_places_setting_keys_before_options() {
+        let plugin = Plugin::new(Meta::new("me/hello", "Hello", "0.1.0"))
+            .widget(
+                "widget",
+                (
+                    vec![Setting::select(
+                        "color",
+                        "settings.color.label",
+                        ("primary", &[("primary", "Primary")]),
+                    )],
+                    |_ctx| Ok(Vec::new()),
+                ),
+            );
+
+        let manifest = manifest(&plugin);
+        let label = manifest.find("label_key").expect("label key");
+        let options = manifest
+            .find("[[widget.setting.options]]")
+            .expect("options");
+
+        assert!(label < options);
+    }
 }
