@@ -49,9 +49,16 @@ impl<'a> Convert<'a> {
             LuaValue::Integer(value) => Ok(json!(value)),
             LuaValue::Number(value) => Ok(json!(value)),
             LuaValue::String(value) => {
-                Ok(JsonValue::String(value.to_string_lossy().to_string()))
+                let bytes = value.as_bytes();
+                match std::str::from_utf8(&bytes) {
+                    Ok(text) => Ok(JsonValue::String(text.to_owned())),
+                    Err(_) => Ok(json!({
+                        noctalia_rs::bytes::BYTES_KEY:
+                            noctalia_rs::bytes::encode_hex(&bytes),
+                    })),
+                }
             }
-            LuaValue::Function(_) => Ok(self.marker()),
+            LuaValue::Function(function) => Ok(self.marker(&function)?),
             LuaValue::Table(table) => {
                 if let Some(marker) = table_marker(&table)? {
                     return Ok(marker);
@@ -79,14 +86,11 @@ impl<'a> Convert<'a> {
         }
     }
 
-    fn marker(&self) -> JsonValue {
+    fn marker(&self, function: &mlua::Function) -> LuaResult<JsonValue> {
+        let id = self.collector.register(function);
         match self.role {
-            FunctionRole::Call => {
-                json!({ "__call": self.collector.callback_id() })
-            }
-            FunctionRole::HostCallback => {
-                json!({ "__host_callback": self.collector.callback_id() })
-            }
+            FunctionRole::Call => Ok(json!({ "__call": id })),
+            FunctionRole::HostCallback => Ok(json!({ "__host_callback": id })),
         }
     }
 
@@ -208,6 +212,33 @@ pub fn from_json(lua: &Lua, value: &JsonValue) -> LuaResult<LuaValue> {
             }
             Ok(LuaValue::Table(table))
         }
+    }
+}
+
+/// Converts a host query value into Lua, decoding bridge byte markers.
+pub fn from_json_with_bytes(
+    lua: &Lua,
+    value: &JsonValue,
+) -> LuaResult<LuaValue> {
+    if let Some(bytes) = noctalia_rs::bytes::marker_bytes(value) {
+        return Ok(LuaValue::String(lua.create_string(bytes)?));
+    }
+    match value {
+        JsonValue::Array(values) => {
+            let table = lua.create_table()?;
+            for (index, item) in values.iter().enumerate() {
+                table.raw_set(index + 1, from_json_with_bytes(lua, item)?)?;
+            }
+            Ok(LuaValue::Table(table))
+        }
+        JsonValue::Object(values) => {
+            let table = lua.create_table()?;
+            for (key, item) in values {
+                table.set(key.as_str(), from_json_with_bytes(lua, item)?)?;
+            }
+            Ok(LuaValue::Table(table))
+        }
+        _ => from_json(lua, value),
     }
 }
 

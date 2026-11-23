@@ -1,16 +1,19 @@
 use std::collections::{HashMap, HashSet};
+use std::fs;
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::{Mutex, RwLock, RwLockReadGuard, RwLockWriteGuard};
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
+use std::sync::{Mutex, OnceLock, RwLock, RwLockReadGuard, RwLockWriteGuard};
 
 use noctalia_rs::{Context, Op};
 use serde_json::Value;
 
 const MAX_TRANSLATION_KEYS: usize = 5000;
+
 #[derive(Default)]
 pub struct Collector {
     ops: Mutex<Vec<Op>>,
     callbacks: AtomicUsize,
+    functions: Mutex<HashMap<String, mlua::Function>>,
 }
 
 impl Collector {
@@ -22,6 +25,17 @@ impl Collector {
     pub fn callback_id(&self) -> String {
         let index = self.callbacks.fetch_add(1, Ordering::Relaxed) + 1;
         format!("noctalia_rs_luau_{index}")
+    }
+
+    pub fn register(&self, function: &mlua::Function) -> String {
+        let id = self.callback_id();
+        let mut functions = crate::locked(&self.functions);
+        functions.insert(id.clone(), function.clone());
+        id
+    }
+
+    pub fn function(&self, id: &str) -> Option<mlua::Function> {
+        crate::locked(&self.functions).get(id).cloned()
     }
 
     pub fn take_ops(&self) -> Vec<Op> {
@@ -88,6 +102,10 @@ impl Snapshot {
             .unwrap_or(Value::Null)
     }
 
+    pub fn has_state(&self, key: &str) -> bool {
+        read(&self.inner).state.get(key).is_some()
+    }
+
     pub fn setting(&self, key: &str) -> Value {
         read(&self.inner)
             .host
@@ -122,22 +140,8 @@ impl Snapshot {
         read(&self.inner).now_ms
     }
 
-    pub fn plugin_dir(&self) -> String {
-        self.host_string("pluginDir").unwrap_or_else(|| {
-            read(&self.inner).data_dir.to_string_lossy().to_string()
-        })
-    }
-
-    pub fn plugin_data_dir(&self) -> String {
-        self.host_string("pluginDataDir")
-            .unwrap_or_else(|| self.plugin_dir())
-    }
-
-    fn host_string(&self, path: &str) -> Option<String> {
-        match self.host_path(path) {
-            Value::String(value) => Some(value),
-            _ => None,
-        }
+    pub fn data_dir(&self) -> PathBuf {
+        read(&self.inner).data_dir.clone()
     }
 }
 
@@ -221,6 +225,8 @@ pub struct Host {
     pub snapshot: Snapshot,
     pub collector: Collector,
     translations: Translations,
+    query_dir: OnceLock<PathBuf>,
+    miss_checked_ms: AtomicU64,
 }
 
 impl Host {
@@ -229,6 +235,8 @@ impl Host {
             snapshot: Snapshot::new(ctx),
             collector: Collector::default(),
             translations: Translations::new(ctx, sources),
+            query_dir: OnceLock::new(),
+            miss_checked_ms: AtomicU64::new(f64::NEG_INFINITY.to_bits()),
         }
     }
 
@@ -239,6 +247,52 @@ impl Host {
 
     pub fn tr(&self, key: &str, params: &[(String, String)]) -> String {
         self.translations.render(key, params)
+    }
+
+    /// Returns the spool directory when a host is attached.
+    ///
+    /// A hit is cached for the runtime's life. A miss is re-checked at most
+    /// once a second, so a host that attaches late is still found without
+    /// asking the filesystem on every host read.
+    pub fn query_dir(&self) -> Option<&std::path::Path> {
+        if let Some(dir) = self.query_dir.get() {
+            return Some(dir);
+        }
+        let now = noctalia_rs::os_clock();
+        let last = f64::from_bits(self.miss_checked_ms.load(Ordering::Relaxed));
+        if now - last < 1.0 {
+            return None;
+        }
+        self.miss_checked_ms.store(now.to_bits(), Ordering::Relaxed);
+        let spool = self.snapshot.data_dir().join(".noctalia-rs").join("spool");
+        spool
+            .is_dir()
+            .then(|| self.query_dir.get_or_init(|| spool).as_path())
+    }
+
+    pub fn response_path(&self, id: &str) -> PathBuf {
+        self.snapshot
+            .data_dir()
+            .join(".noctalia-rs")
+            .join("query")
+            .join(format!("{id}.json"))
+    }
+
+    pub fn read_response(&self, path: &std::path::Path) -> Option<Value> {
+        use std::thread;
+        use std::time::{Duration, Instant};
+
+        let deadline = Instant::now() + Duration::from_millis(100);
+        loop {
+            if let Ok(text) = fs::read_to_string(path) {
+                let _ = fs::remove_file(path);
+                return serde_json::from_str(&text).ok();
+            }
+            if Instant::now() >= deadline {
+                return None;
+            }
+            thread::sleep(Duration::from_millis(1));
+        }
     }
 }
 
