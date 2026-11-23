@@ -15,16 +15,16 @@
       "updatedAt": "2026-11-23T00:53:41.071Z"
     },
     "spool_dispatch": {
-      "sha": "3d81f62a9c12ce2dec0c0adb1c22a12098b1a98c",
+      "sha": "40c01111f67a70b4076627b19c124c8f5748b115",
       "method": 1,
-      "medianMs": 1.085449,
-      "worstMedianMs": 1.0900045,
-      "p95Ms": 1.09485,
-      "worstP95Ms": 1.108693,
-      "p99Ms": 1.101275,
-      "worstP99Ms": 1.125452,
+      "medianMs": 1.1232105000000001,
+      "worstMedianMs": 1.1279405000000002,
+      "p95Ms": 1.1339659999999998,
+      "worstP95Ms": 1.1647850000000002,
+      "p99Ms": 1.139827,
+      "worstP99Ms": 1.3077809999999999,
       "budgetMs": 10,
-      "updatedAt": "2026-11-23T00:53:41.071Z"
+      "updatedAt": "2026-11-23T13:54:23.932Z"
     },
     "luau_vm_creation": {
       "sha": "3d81f62a9c12ce2dec0c0adb1c22a12098b1a98c",
