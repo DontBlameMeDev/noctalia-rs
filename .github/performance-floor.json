@@ -75,16 +75,16 @@
       "updatedAt": "2026-11-22T22:58:58.123Z"
     },
     "bridge_snapshot_reads": {
-      "sha": "7894ae39112041b23ecd08071407cd012c351448",
+      "sha": "11805511dc76665e22766840332a2cde68cc3efc",
       "method": 1,
-      "medianMs": 0.020033500000000003,
-      "worstMedianMs": 0.020206,
-      "p95Ms": 0.022581,
-      "worstP95Ms": 0.023372,
-      "p99Ms": 0.035317,
-      "worstP99Ms": 0.040902,
+      "medianMs": 0.0262605,
+      "worstMedianMs": 0.0271475,
+      "p95Ms": 0.030597,
+      "worstP95Ms": 0.031213,
+      "p99Ms": 0.03646,
+      "worstP99Ms": 0.058025,
       "budgetMs": 5,
-      "updatedAt": "2026-11-22T22:58:58.123Z"
+      "updatedAt": "2026-11-23T00:40:13.510Z"
     },
     "json_encode_rust": {
       "sha": "7894ae39112041b23ecd08071407cd012c351448",
@@ -147,16 +147,16 @@
       "updatedAt": "2026-11-22T22:58:58.123Z"
     },
     "build_incremental_release": {
-      "sha": "7894ae39112041b23ecd08071407cd012c351448",
+      "sha": "11805511dc76665e22766840332a2cde68cc3efc",
       "method": 1,
-      "medianMs": 94.2210875,
-      "worstMedianMs": 98.7873345,
-      "p95Ms": 96.459803,
-      "worstP95Ms": 100.12305599999999,
-      "p99Ms": 96.459803,
-      "worstP99Ms": 100.12305599999999,
+      "medianMs": 120.6405615,
+      "worstMedianMs": 121.9810875,
+      "p95Ms": 121.52740700000001,
+      "worstP95Ms": 122.368993,
+      "p99Ms": 121.52740700000001,
+      "worstP99Ms": 122.368993,
       "budgetMs": 120000,
-      "updatedAt": "2026-11-22T22:58:58.123Z"
+      "updatedAt": "2026-11-23T00:40:13.510Z"
     }
   }
 }
