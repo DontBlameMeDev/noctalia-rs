@@ -75,16 +75,16 @@
       "updatedAt": "2026-11-23T00:53:41.071Z"
     },
     "bridge_snapshot_reads": {
-      "sha": "18e6749a13c2debd46eca4d6a430153a8e90a8f0",
+      "sha": "7ef331f6204dca4e9ee3b1ab0491c3647e165288",
       "method": 1,
-      "medianMs": 0.0256635,
-      "worstMedianMs": 0.025903000000000002,
-      "p95Ms": 0.029886000000000003,
-      "worstP95Ms": 0.03193,
-      "p99Ms": 0.046136,
-      "worstP99Ms": 0.063719,
+      "medianMs": 0.0188435,
+      "worstMedianMs": 0.019162500000000002,
+      "p95Ms": 0.021467,
+      "worstP95Ms": 0.023064,
+      "p99Ms": 0.033415999999999994,
+      "worstP99Ms": 0.035568,
       "budgetMs": 5,
-      "updatedAt": "2026-11-23T01:08:40.690Z"
+      "updatedAt": "2026-11-23T01:21:43.390Z"
     },
     "json_encode_rust": {
       "sha": "3d81f62a9c12ce2dec0c0adb1c22a12098b1a98c",
