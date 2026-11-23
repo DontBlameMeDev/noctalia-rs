@@ -51,16 +51,16 @@
       "updatedAt": "2026-11-23T01:37:51.473Z"
     },
     "luau_runtime_dispatch": {
-      "sha": "3d81f62a9c12ce2dec0c0adb1c22a12098b1a98c",
+      "sha": "50c14fe7a37b5419c0ff41e75ed136c195ddb3dc",
       "method": 1,
-      "medianMs": 0.006433500000000001,
-      "worstMedianMs": 0.006789,
-      "p95Ms": 0.007968999999999999,
-      "worstP95Ms": 0.008761,
-      "p99Ms": 0.008635,
-      "worstP99Ms": 0.025568,
+      "medianMs": 0.004858,
+      "worstMedianMs": 0.0049135,
+      "p95Ms": 0.005968,
+      "worstP95Ms": 0.006804999999999999,
+      "p99Ms": 0.006674,
+      "worstP99Ms": 0.024600999999999998,
       "budgetMs": 2,
-      "updatedAt": "2026-11-23T00:53:41.071Z"
+      "updatedAt": "2026-11-23T02:10:50.217Z"
     },
     "json_roundtrip_luau": {
       "sha": "3d81f62a9c12ce2dec0c0adb1c22a12098b1a98c",
