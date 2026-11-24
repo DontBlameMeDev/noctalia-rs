@@ -163,3 +163,100 @@ After API 57 parity landed, the same release harness was run again with `nix dev
 | service\_update | 0.371 | 12.724 | 34.30x | yes |
 
 The parity work therefore kept the baseline and all six matched workloads remain above 3x.
+
+## Compiled Luau entries
+
+The compiler turns one Rust handler into a complete Luau entry. This section
+measures that output against hand-written Luau doing the same work.
+
+Each fixture uses one deterministic `Context`. The compiled side is generated
+by `noctalia-rs-compiler` from the Rust handler in `crates/bench/src/generated.rs`.
+The hand-written side is the equivalent plugin a person would write, including
+the same load render, state watch, and `panel.setWantsSecondTicks` startup.
+Both run through `noctalia_rs_luau::dispatch` with a warm cached VM. Op output is
+compared before timing, including the startup render and the measured event,
+and must match after filtering startup `host_call` ops that the Rust handler
+does not perform.
+
+Run three rounds of 300 samples. Speedup is `hand-written / compiled`, so 1.0
+is parity. Times are microseconds. The ratio column is the median of the three
+round ratios, so it does not always equal the quotient of the two medians below
+it when the host is noisy.
+
+| Workload | Compiled medians r1/r2/r3 | Hand medians r1/r2/r3 | Speedups r1/r2/r3 | Median speedup | Source bytes compiled / hand-written |
+| :-- | :-- | :-- | :-- | --: | :-- |
+| generated\_hello\_bar | 1.934 / 1.894 / 1.893 | 2.054 / 2.004 / 1.953 | 1.01 / 1.01 / 0.98 | 1.01x | 2405 / 467 |
+| generated\_ui\_panel | 9.889 / 10.008 / 9.969 | 17.021 / 16.551 / 16.390 | 1.72 / 1.65 / 1.64 | 1.64x | 2938 / 637 |
+| generated\_event | 3.637 / 3.702 / 3.606 | 3.651 / 4.348 / 4.078 | 1.00 / 0.98 / 0.99 | 0.99x | 3174 / 447 |
+
+The UI tree clears parity in every round. The two small fixtures sit on the
+same roughly 2 us dispatch floor, so their ratios move with host load. Treat
+`generated_hello_bar` and `generated_event` as parity within measurement noise.
+The compiled scripts carry every callback a host may invoke, so they are larger
+than the hand-written mirrors here; the win on UI trees comes from emitting
+node tables directly instead of calling `ui.row` and `ui.label`.
+
+The 3x target is not measured against hand-written Luau. Both sides pay the
+same dispatch floor, so 3x is not reachable there. It is measured against the
+bridge path this replaces. This run includes the idle helper CPU change from
+`main`, so `spool_dispatch` is 77 / 77 / 80 us across the three rounds, with a
+median of 77 us. Compiled renders are 1.9 us to 10.0 us, or 8x to 41x faster
+than the bridge.
+
+### Correctness fixes behind this run
+
+The first compiler pass had four defects found by audit. This run includes the
+fixes:
+
+- a const-folded `if` with an early `return` now wraps the taken branch in
+  `do ... end`, so the following statements stay parseable;
+- launcher entries no longer emit an invented load render, and their state
+  rerender passes `last_query` instead of dropping the query text;
+- `unwrap_or` on a bool uses `bool_or`, so `false` is not replaced by the
+  default;
+- `config_str` and `payload_str` coerce numbers the way `Context` does. String
+  config keys declared in `noctalia.toml` skip that coercion.
+- `payload_str` keys that match a callback parameter are passed as parameters,
+  so an `activate` handler takes `id` directly instead of building and reading
+  a payload table.
+
+### Template output
+
+The same release build emitted the template before and after opting both
+entries into `luau = "src/main.rs"`. Compiled entries now declare every host
+callback, which is why the generated script is close in size to the bridge stub
+even though it has no helper or IPC.
+
+| File | Bridge stub | Compiled |
+| :-- | --: | --: |
+| `widget.luau` | 2,255 B | 380 B |
+| `service.luau` | 2,175 B | 270 B |
+| `lib/bridge.luau` | 437 lines | not emitted |
+| total lines in the plugin directory | 545 | 61 |
+
+### Exact command
+
+```sh
+for i in 1 2 3; do
+  nix develop --command cargo run --release -p noctalia-bench --offline -- \
+    --samples 300 --warmup 30 --build-samples 1 --build-warmup 0 \
+    --report ".tmp/round-$i.json"
+done
+```
+
+### Machine metadata
+
+| Field | Value |
+| :-- | :-- |
+| Timestamp | 2026-11-24T17:05:00Z |
+| OS | Linux 7.3.5 x86\_64 |
+| CPU | AMD Ryzen 7 8845HS w/ Radeon 780M Graphics |
+| Logical CPUs | 16 |
+| Max frequency | 3,801,000 kHz |
+| Memory | 96,582,424 KiB |
+| rustc | 1.99.1 (58cf8f9c3 2026-10-13) |
+| cargo | 1.99.1 (5f94df478 2026-08-27) |
+| Profile | release, fat LTO, codegen-units 1 |
+| Samples | 300 per surface, 30 warmup, 3 rounds |
+| Percentiles | nearest rank |
+| Timer | `std::time::Instant` |

@@ -3,10 +3,40 @@ use std::fmt::Write as _;
 use std::fs;
 use std::path::{Component, Path, PathBuf};
 
+use noctalia_rs_compiler as compiler;
 use toml::Value;
 
 type BoxError = Box<dyn Error>;
 type EntryScripts = Vec<(String, String)>;
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum CompileMode {
+    Auto,
+    Strict,
+    Off,
+}
+
+fn compile_mode(
+    root: &toml::Table,
+    env_override: Option<&str>,
+) -> Result<CompileMode, BoxError> {
+    let (value, label) = match env_override {
+        Some(value) => (value, "NOCTALIA_RS_COMPILE"),
+        None => match root.get("compile") {
+            Some(value) => (text(value, "compile")?, "compile"),
+            None => ("auto", "compile"),
+        },
+    };
+    match value {
+        "auto" => Ok(CompileMode::Auto),
+        "strict" => Ok(CompileMode::Strict),
+        "off" => Ok(CompileMode::Off),
+        other => Err(format!(
+            "{label} must be `auto`, `strict`, or `off`: {other}"
+        )
+        .into()),
+    }
+}
 
 const ENTRY_KINDS: &[&str] = &[
     "service",
@@ -30,6 +60,17 @@ struct FileContext<'a> {
     out_dir: &'a Path,
     root: &'a toml::Table,
 }
+
+struct CompileContext<'a> {
+    source: &'a Path,
+    out_dir: &'a Path,
+    mode: CompileMode,
+    state_key: &'a str,
+    strings: &'a [&'a str],
+    constants: &'a mut String,
+    warnings: &'a mut Vec<String>,
+}
+
 fn identifier(value: &str) -> String {
     let mut out = String::new();
     for (index, item) in value.chars().enumerate() {
@@ -71,11 +112,25 @@ pub fn generate() -> Result<(), BoxError> {
     let manifest = Path::new("noctalia.toml");
     let out = std::env::var("OUT_DIR")?;
     println!("cargo:rerun-if-changed=noctalia.toml");
+    println!("cargo:rerun-if-env-changed=NOCTALIA_RS_COMPILE");
     watch_tree(Path::new("."))?;
     generate_to(manifest, Path::new(&out))
 }
 
 pub fn generate_to(manifest: &Path, out_dir: &Path) -> Result<(), BoxError> {
+    let env_override = std::env::var("NOCTALIA_RS_COMPILE").ok();
+    let warnings = generate_with(manifest, out_dir, env_override.as_deref())?;
+    for warning in warnings {
+        println!("cargo:warning={warning}");
+    }
+    Ok(())
+}
+
+fn generate_with(
+    manifest: &Path,
+    out_dir: &Path,
+    env_override: Option<&str>,
+) -> Result<Vec<String>, BoxError> {
     let text = fs::read_to_string(manifest)?;
     let value: Value = toml::from_str(&text)?;
     let root = value.as_table().ok_or("manifest is not a table")?;
@@ -83,14 +138,33 @@ pub fn generate_to(manifest: &Path, out_dir: &Path) -> Result<(), BoxError> {
         .parent()
         .filter(|value| !value.as_os_str().is_empty())
         .unwrap_or_else(|| Path::new("."));
+    let mode = compile_mode(root, env_override)?;
+    let mut warnings = Vec::new();
 
     let mut generated = Generated::default();
     write_meta(&mut generated.body, root)
         .map_err(|error| format!("meta: {error}"))?;
     write_settings(&mut generated.body, root, "plugin")
         .map_err(|error| format!("settings: {error}"))?;
-    write_entries(&mut generated.body, root)
-        .map_err(|error| format!("entries: {error}"))?;
+    let state_key = state_key(root)?;
+    let string_keys = string_settings(root);
+    let strings = string_keys.iter().map(String::as_str).collect::<Vec<_>>();
+    let mut constants = String::new();
+    write_entries(
+        &mut generated.body,
+        root,
+        &mut CompileContext {
+            source,
+            out_dir,
+            mode,
+            state_key: &state_key,
+            strings: &strings,
+            constants: &mut constants,
+            warnings: &mut warnings,
+        },
+    )
+    .map_err(|error| format!("entries: {error}"))?;
+    generated.prefix.push_str(&constants);
     {
         let mut context = FileContext {
             generated: &mut generated,
@@ -142,7 +216,7 @@ pub fn generate_to(manifest: &Path, out_dir: &Path) -> Result<(), BoxError> {
     let out = qualify_types(&out);
     let target = out_dir.join("generated.rs");
     fs::write(target, out)?;
-    Ok(())
+    Ok(warnings)
 }
 
 fn default_entry_scripts(root: &toml::Table) -> Result<EntryScripts, BoxError> {
@@ -620,7 +694,11 @@ fn optional_number(item: &toml::Table, key: &str) -> Result<String, BoxError> {
     Ok(format!("Some({})", f64_literal(number(value, key)?)))
 }
 
-fn write_entries(out: &mut String, root: &toml::Table) -> Result<(), BoxError> {
+fn write_entries(
+    out: &mut String,
+    root: &toml::Table,
+    context: &mut CompileContext<'_>,
+) -> Result<(), BoxError> {
     for &kind in ENTRY_KINDS {
         let Some(value) = root.get(kind) else {
             continue;
@@ -628,7 +706,7 @@ fn write_entries(out: &mut String, root: &toml::Table) -> Result<(), BoxError> {
         for (index, item) in array(value, kind)?.iter().enumerate() {
             let label = format!("{kind}[{index}]");
             let row = table(item, &label)?;
-            let expression = entry_expression(row, kind, &label)?;
+            let expression = entry_expression(row, kind, &label, context)?;
             let _ = writeln!(out, "    plugin = plugin.entry({expression});");
         }
     }
@@ -639,6 +717,7 @@ fn entry_expression(
     row: &toml::Table,
     kind: &str,
     label: &str,
+    context: &mut CompileContext<'_>,
 ) -> Result<String, BoxError> {
     let id = text(row.get("id").ok_or("missing entry id")?, "id")?;
     let handler = row
@@ -646,6 +725,7 @@ fn entry_expression(
         .map(|value| text(value, "handler"))
         .transpose()?
         .unwrap_or("dispatch");
+    let handler_name = handler;
     let handler = identifier(handler);
     let script = row
         .get("entry")
@@ -705,10 +785,439 @@ fn entry_expression(
         .unwrap_or_default();
     let settings = format!("vec![{}]", settings.join(", "));
     let config = entry_config(row, script)?;
-    Ok(format!(
+    let mut expression = format!(
         "Entry::configured(({}.to_owned(), {entry_kind}, {settings}, {config}), {handler})",
         quote(id)
-    ))
+    );
+    if let Some(constant) =
+        compile_entry(row, id, script, kind, handler_name, context)?
+    {
+        let _ = write!(expression, ".with_luau({constant})");
+    }
+    Ok(expression)
+}
+
+fn compiler_kind(kind: &str) -> Result<compiler::EntryKind, BoxError> {
+    Ok(match kind {
+        "service" => compiler::EntryKind::Service,
+        "widget" => compiler::EntryKind::Widget,
+        "shortcut" => compiler::EntryKind::Shortcut,
+        "desktop_widget" => compiler::EntryKind::DesktopWidget,
+        "launcher_provider" => compiler::EntryKind::Launcher,
+        "panel" => compiler::EntryKind::Panel,
+        "layer" => compiler::EntryKind::Layer,
+        other => return Err(format!("unsupported entry kind {other}").into()),
+    })
+}
+
+fn string_settings(root: &toml::Table) -> Vec<String> {
+    let mut keys = Vec::new();
+    collect_string_settings(root.get("setting"), &mut keys);
+    for kind in ENTRY_KINDS {
+        let Some(entries) = root.get(*kind).and_then(Value::as_array) else {
+            continue;
+        };
+        for entry in entries {
+            if let Some(table) = entry.as_table() {
+                collect_string_settings(table.get("setting"), &mut keys);
+            }
+        }
+    }
+    keys
+}
+
+fn collect_string_settings(value: Option<&Value>, keys: &mut Vec<String>) {
+    let Some(items) = value.and_then(Value::as_array) else {
+        return;
+    };
+    for item in items {
+        let Some(table) = item.as_table() else {
+            continue;
+        };
+        if table.get("type").and_then(Value::as_str) != Some("string") {
+            continue;
+        }
+        if let Some(key) = table.get("key").and_then(Value::as_str) {
+            keys.push(key.to_owned());
+        }
+    }
+}
+
+fn state_key(root: &toml::Table) -> Result<String, BoxError> {
+    let id = text(root.get("id").ok_or("missing id")?, "id")?;
+    let last = id.split('/').next_back().unwrap_or(id);
+    Ok(format!("{last}.state"))
+}
+
+struct ModuleFile {
+    module: String,
+    file: PathBuf,
+    source: String,
+}
+
+/// Module path from a file path, used when the file is not reachable from
+/// `src/main.rs` (a standalone `luau` file, for example).
+fn module_path(relative: &Path) -> Option<String> {
+    let relative = relative.strip_prefix("src").ok()?;
+    let mut parts = relative
+        .components()
+        .map(|part| part.as_os_str().to_string_lossy().into_owned())
+        .collect::<Vec<_>>();
+    let file = parts.pop()?;
+    let stem = file.strip_suffix(".rs")?;
+    if stem == "main" || stem == "lib" {
+        if parts.is_empty() {
+            return Some("main".to_owned());
+        }
+        return Some(parts.join("::"));
+    }
+    if stem != "mod" {
+        parts.push(stem.to_owned());
+    }
+    Some(parts.join("::"))
+}
+
+fn walk_sources(
+    root: &Path,
+    dir: &Path,
+    out: &mut Vec<ModuleFile>,
+) -> Result<(), BoxError> {
+    let Ok(entries) = fs::read_dir(dir) else {
+        return Ok(());
+    };
+    let mut entries = entries.collect::<Result<Vec<_>, _>>()?;
+    entries.sort_by_key(std::fs::DirEntry::path);
+    for entry in entries {
+        let path = entry.path();
+        if path.is_dir() {
+            walk_sources(root, &path, out)?;
+            continue;
+        }
+        if path.extension().and_then(|value| value.to_str()) != Some("rs") {
+            continue;
+        }
+        let Ok(relative) = path.strip_prefix(root) else {
+            continue;
+        };
+        let Some(module) = module_path(relative) else {
+            continue;
+        };
+        let source = fs::read_to_string(&path)
+            .map_err(|error| format!("read {}: {error}", path.display()))?;
+        out.push(ModuleFile {
+            module,
+            file: path,
+            source,
+        });
+    }
+    Ok(())
+}
+
+/// Reads the crate's module tree from `src/main.rs` or `src/lib.rs`, following
+/// `mod` declarations and `#[path]` attributes.
+fn crate_modules(root: &Path) -> Result<Vec<ModuleFile>, BoxError> {
+    let main = root.join("src/main.rs");
+    let lib = root.join("src/lib.rs");
+    let mut modules = Vec::new();
+    if main.is_file() {
+        module_files(&main, "main", true, false, &mut modules)?;
+    } else if lib.is_file() {
+        module_files(&lib, "main", true, false, &mut modules)?;
+    }
+    Ok(modules)
+}
+
+fn module_files(
+    file: &Path,
+    module: &str,
+    is_root: bool,
+    explicit_path: bool,
+    out: &mut Vec<ModuleFile>,
+) -> Result<(), BoxError> {
+    let source = fs::read_to_string(file)
+        .map_err(|error| format!("read {}: {error}", file.display()))?;
+    let parsed = syn::parse_file(&source)
+        .map_err(|error| format!("parse {}: {error}", file.display()))?;
+    out.push(ModuleFile {
+        module: module.to_owned(),
+        file: file.to_path_buf(),
+        source,
+    });
+    let parent = file.parent().unwrap_or_else(|| Path::new("."));
+    let stem = file.file_stem().and_then(|value| value.to_str());
+    let directory = match stem {
+        Some("main" | "lib" | "mod") | None => parent.to_path_buf(),
+        Some(_) if explicit_path => parent.to_path_buf(),
+        Some(name) => parent.join(name),
+    };
+    module_tree(&directory, parent, module, is_root, &parsed.items, out)
+}
+
+fn module_tree(
+    directory: &Path,
+    declaring: &Path,
+    module: &str,
+    is_root: bool,
+    items: &[syn::Item],
+    out: &mut Vec<ModuleFile>,
+) -> Result<(), BoxError> {
+    for item in items {
+        let syn::Item::Mod(item_mod) = item else {
+            continue;
+        };
+        let name = item_mod.ident.to_string();
+        let child = if is_root {
+            name.clone()
+        } else {
+            format!("{module}::{name}")
+        };
+        if let Some((_, inner)) = &item_mod.content {
+            let nested = directory.join(&name);
+            module_tree(&nested, &nested, &child, false, inner, out)?;
+            continue;
+        }
+        let attribute = item_mod.attrs.iter().find_map(|attr| {
+            if !attr.path().is_ident("path") {
+                return None;
+            }
+            let syn::Meta::NameValue(value) = &attr.meta else {
+                return None;
+            };
+            let syn::Expr::Lit(literal) = &value.value else {
+                return None;
+            };
+            let syn::Lit::Str(path) = &literal.lit else {
+                return None;
+            };
+            Some(path.value())
+        });
+        let explicit = attribute.is_some();
+        let candidate = match attribute {
+            Some(path) => declaring.join(path),
+            None => {
+                let file = directory.join(format!("{name}.rs"));
+                let mod_file = directory.join(&name).join("mod.rs");
+                if file.is_file() {
+                    file
+                } else if mod_file.is_file() {
+                    mod_file
+                } else {
+                    continue;
+                }
+            }
+        };
+        module_files(&candidate, &child, false, explicit, out)?;
+    }
+    Ok(())
+}
+
+struct HandlerSite {
+    file: PathBuf,
+    source: String,
+    module: String,
+    modules: Vec<ModuleFile>,
+}
+
+impl HandlerSite {
+    fn new(
+        file: PathBuf,
+        source: String,
+        module: String,
+        modules: Vec<ModuleFile>,
+    ) -> Self {
+        let modules = modules
+            .into_iter()
+            .filter(|item| item.module != module)
+            .collect();
+        Self {
+            file,
+            source,
+            module,
+            modules,
+        }
+    }
+}
+
+fn source_relative(file: &Path, root: &Path) -> PathBuf {
+    file.strip_prefix(root).unwrap_or(file).to_path_buf()
+}
+
+fn walk_all(root: &Path) -> Result<Vec<ModuleFile>, BoxError> {
+    let mut files = Vec::new();
+    walk_sources(root, &root.join("src"), &mut files)?;
+    Ok(files)
+}
+
+fn find_handler(
+    items: &[syn::Item],
+    module: &str,
+    is_root: bool,
+    handler: &str,
+) -> Option<String> {
+    for item in items {
+        if let syn::Item::Fn(function) = item
+            && function.sig.ident == handler
+        {
+            return Some(module.to_owned());
+        }
+        if let syn::Item::Mod(item_mod) = item
+            && let Some((_, inner)) = &item_mod.content
+        {
+            let name = item_mod.ident.to_string();
+            let child = if is_root {
+                name
+            } else {
+                format!("{module}::{name}")
+            };
+            if let Some(found) = find_handler(inner, &child, false, handler) {
+                return Some(found);
+            }
+        }
+    }
+    None
+}
+
+fn handler_module(
+    file: &ModuleFile,
+    handler: &str,
+) -> Result<Option<String>, BoxError> {
+    let parsed = syn::parse_file(&file.source)
+        .map_err(|error| format!("parse {}: {error}", file.file.display()))?;
+    Ok(find_handler(&parsed.items, &file.module, true, handler))
+}
+
+fn handler_site(
+    context: &CompileContext<'_>,
+    row: &toml::Table,
+    handler: &str,
+) -> Result<Option<HandlerSite>, BoxError> {
+    let mut files = crate_modules(context.source)?;
+    if let Some(value) = row.get("luau") {
+        let relative = safe_relative_path(text(value, "luau")?, "luau")?;
+        let target = context.source.join(&relative);
+        let source = fs::read_to_string(&target)
+            .map_err(|error| format!("read {}: {error}", relative.display()))?;
+        let module = if let Some(found) =
+            files.iter().find(|file| file.file == target)
+        {
+            found.module.clone()
+        } else {
+            files = walk_all(context.source)?;
+            module_path(&relative).ok_or_else(|| {
+                format!("luau file must live in src/: {}", relative.display())
+            })?
+        };
+        return Ok(Some(HandlerSite::new(relative, source, module, files)));
+    }
+
+    let mut found = None;
+    for (index, file) in files.iter().enumerate() {
+        if let Some(module) = handler_module(file, handler)? {
+            found = Some((index, module));
+            break;
+        }
+    }
+    let Some((index, module)) = found else {
+        return Ok(None);
+    };
+    let file = files.remove(index);
+    let relative = source_relative(&file.file, context.source);
+    Ok(Some(HandlerSite::new(relative, file.source, module, files)))
+}
+
+fn compile_failure(
+    mode: CompileMode,
+    warnings: &mut Vec<String>,
+    id: &str,
+    rendered: String,
+) -> Result<Option<String>, BoxError> {
+    let message = format!("entry {id}: {rendered}");
+    if mode == CompileMode::Strict {
+        return Err(message.into());
+    }
+    warnings.push(message);
+    Ok(None)
+}
+
+/// Compiles the entry handler, writing the script next to `generated.rs` and
+/// returning the constant that holds it.
+fn compile_entry(
+    row: &toml::Table,
+    id: &str,
+    script: Option<&str>,
+    kind: &str,
+    handler: &str,
+    context: &mut CompileContext<'_>,
+) -> Result<Option<String>, BoxError> {
+    if context.mode == CompileMode::Strict && !row.contains_key("handler") {
+        return Err(format!(
+            "entry {id}: noctalia.toml:1:1: no handler to compile in strict mode"
+        )
+        .into());
+    }
+    if context.mode == CompileMode::Off || !row.contains_key("handler") {
+        return Ok(None);
+    }
+    let Some(site) = handler_site(context, row, handler)? else {
+        let file = if context.source.join("src/main.rs").is_file() {
+            "src/main.rs"
+        } else if context.source.join("src/lib.rs").is_file() {
+            "src/lib.rs"
+        } else {
+            "noctalia.toml"
+        };
+        let rendered = format!(
+            "{file}:1:1: handler `{handler}` not found in crate source"
+        );
+        return compile_failure(context.mode, context.warnings, id, rendered);
+    };
+    let owned = site
+        .modules
+        .iter()
+        .map(|file| compiler::Module {
+            path: &file.module,
+            source: &file.source,
+        })
+        .collect::<Vec<_>>();
+    let display = site.file.to_string_lossy();
+    let result = compiler::compile(
+        &site.source,
+        &compiler::Options {
+            handler,
+            entry: id,
+            state_key: context.state_key,
+            kind: compiler_kind(kind)?,
+            strings: context.strings,
+            module: &site.module,
+            modules: &owned,
+        },
+    );
+    let compiled = match result {
+        Ok(compiled) => compiled,
+        Err(error) => {
+            return compile_failure(
+                context.mode,
+                context.warnings,
+                id,
+                error.render(&display),
+            );
+        }
+    };
+
+    let key = script.unwrap_or(id);
+    let name = format!("{key}.luau");
+    let target = context.out_dir.join("luau").join(&name);
+    if let Some(parent) = target.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    fs::write(target, compiled.source)?;
+
+    let constant = format!("LUAU_{}", identifier(key).to_uppercase());
+    let _ = writeln!(
+        context.constants,
+        "pub const {constant}: &str = include_str!(concat!(env!(\"OUT_DIR\"), \"/luau/{name}\"));"
+    );
+    Ok(Some(constant))
 }
 
 fn numeric_or_text(
@@ -1188,6 +1697,287 @@ mod tests {
                 "{key} {path} was not rejected as relative"
             );
         }
+        Ok(())
+    }
+
+    const COMPILED_HANDLER: &str = "use noctalia_rs::{Context, Op, Result};\n\nfn handler(ctx: &Context) -> Result<Vec<Op>> {\n    if ctx.event == \"render\" {\n        Ok(vec![Op::BarText { text: \"hi\".to_owned() }])\n    } else {\n        Ok(Vec::new())\n    }\n}\n";
+
+    #[test]
+    fn generate_to_compiles_luau_entries() -> Result<(), BoxError> {
+        let nanos = SystemTime::now().duration_since(UNIX_EPOCH)?.as_nanos();
+        let dir =
+            std::env::temp_dir().join(format!("noctalia-build-luau-{nanos}"));
+        fs::create_dir_all(dir.join("src"))?;
+        fs::write(
+            dir.join("noctalia.toml"),
+            "id = \"me/test\"\nname = \"Test\"\n\n[[widget]]\nid = \"widget\"\nentry = \"widget.luau\"\nhandler = \"handler\"\nluau = \"src/handler.rs\"\n",
+        )?;
+        fs::write(dir.join("src/handler.rs"), COMPILED_HANDLER)?;
+
+        generate_with(&dir.join("noctalia.toml"), &dir, None)?;
+        let generated = fs::read_to_string(dir.join("generated.rs"))?;
+        let script = fs::read_to_string(dir.join("luau/widget.luau"))?;
+        fs::remove_dir_all(&dir)?;
+
+        assert!(generated.contains(
+            "pub const LUAU_WIDGET: &str = include_str!(concat!(env!(\"OUT_DIR\"), \"/luau/widget.luau\"));"
+        ));
+        assert!(generated.contains(".with_luau(LUAU_WIDGET)"));
+        assert!(!generated.contains("src/handler.rs"));
+        assert!(script.contains("barWidget.setText"));
+        Ok(())
+    }
+
+    #[test]
+    fn generate_to_renders_luau_compile_errors() -> Result<(), BoxError> {
+        let nanos = SystemTime::now().duration_since(UNIX_EPOCH)?.as_nanos();
+        let dir = std::env::temp_dir()
+            .join(format!("noctalia-build-luau-error-{nanos}"));
+        fs::create_dir_all(dir.join("src"))?;
+        fs::write(
+            dir.join("noctalia.toml"),
+            "id = \"me/test\"\nname = \"Test\"\ncompile = \"strict\"\n\n[[widget]]\nid = \"widget\"\nhandler = \"handler\"\nluau = \"src/handler.rs\"\n",
+        )?;
+        fs::write(
+            dir.join("src/handler.rs"),
+            "use noctalia_rs::{Context, Op, Result};\n\nfn handler(ctx: &Context) -> Result<Vec<Op>> {\n    Ok(vec![Op::Nope])\n}\n",
+        )?;
+
+        let result = generate_with(&dir.join("noctalia.toml"), &dir, None);
+        fs::remove_dir_all(&dir)?;
+
+        let message = result.expect_err("compile error").to_string();
+        assert!(message.contains("src/handler.rs:4:"), "{message}");
+        assert!(message.contains("op `Nope` is not supported"), "{message}");
+        Ok(())
+    }
+
+    #[test]
+    fn generate_to_rejects_traversal_luau_paths() -> Result<(), BoxError> {
+        let nanos = SystemTime::now().duration_since(UNIX_EPOCH)?.as_nanos();
+        let dir = std::env::temp_dir()
+            .join(format!("noctalia-build-luau-path-{nanos}"));
+        fs::create_dir_all(&dir)?;
+        fs::write(
+            dir.join("noctalia.toml"),
+            "id = \"me/test\"\nname = \"Test\"\n\n[[widget]]\nid = \"widget\"\nhandler = \"handler\"\nluau = \"../escape.rs\"\n",
+        )?;
+
+        let result = generate_to(&dir.join("noctalia.toml"), &dir);
+        fs::remove_dir_all(&dir)?;
+
+        assert!(
+            result.err().is_some_and(|error| error
+                .to_string()
+                .contains("relative path")),
+            "luau path was not rejected"
+        );
+        Ok(())
+    }
+
+    const UNTRANSLATABLE_HANDLER: &str = "use noctalia_rs::{Context, Op, Result};\n\nfn handler(ctx: &Context) -> Result<Vec<Op>> {\n    Ok(vec![Op::Nope])\n}\n";
+
+    const DISCOVERED_MANIFEST: &str = "id = \"me/test\"\nname = \"Test\"\n\n[[widget]]\nid = \"widget\"\nentry = \"widget.luau\"\nhandler = \"handler\"\n";
+
+    fn compile_fixture(
+        label: &str,
+        manifest: &str,
+        source: &str,
+    ) -> Result<(PathBuf, PathBuf), BoxError> {
+        let nanos = SystemTime::now().duration_since(UNIX_EPOCH)?.as_nanos();
+        let dir = std::env::temp_dir()
+            .join(format!("noctalia-build-{label}-{nanos}"));
+        fs::create_dir_all(dir.join("src"))?;
+        fs::write(dir.join("noctalia.toml"), manifest)?;
+        fs::write(dir.join("src/main.rs"), source)?;
+        Ok((dir.join("noctalia.toml"), dir))
+    }
+
+    #[test]
+    fn generate_with_auto_compiles_discovered_handler() -> Result<(), BoxError>
+    {
+        let (manifest, dir) =
+            compile_fixture("auto", DISCOVERED_MANIFEST, COMPILED_HANDLER)?;
+        let warnings = generate_with(&manifest, &dir, None)?;
+        let generated = fs::read_to_string(dir.join("generated.rs"))?;
+        let script = fs::read_to_string(dir.join("luau/widget.luau"))?;
+        fs::remove_dir_all(&dir)?;
+
+        assert!(generated.contains(".with_luau(LUAU_WIDGET)"));
+        assert!(script.contains("barWidget.setText"));
+        assert!(warnings.is_empty());
+        assert!(!generated.contains("compile ="));
+        assert!(!generated.contains("luau ="));
+        Ok(())
+    }
+
+    #[test]
+    fn generate_with_auto_falls_back_to_bridge() -> Result<(), BoxError> {
+        let (manifest, dir) = compile_fixture(
+            "auto-fallback",
+            DISCOVERED_MANIFEST,
+            UNTRANSLATABLE_HANDLER,
+        )?;
+        let warnings = generate_with(&manifest, &dir, None)?;
+        let generated = fs::read_to_string(dir.join("generated.rs"))?;
+        fs::remove_dir_all(&dir)?;
+
+        assert!(generated.contains("Entry::configured"));
+        assert!(!generated.contains(".with_luau("));
+        assert_eq!(warnings.len(), 1, "{warnings:?}");
+        assert!(warnings[0].contains("widget"), "{}", warnings[0]);
+        assert!(warnings[0].contains("src/main.rs:4:"), "{}", warnings[0]);
+        assert!(
+            warnings[0].contains("op `Nope` is not supported"),
+            "{}",
+            warnings[0]
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn generate_with_strict_rejects_untranslatable_handler()
+    -> Result<(), BoxError> {
+        let manifest_text =
+            format!("compile = \"strict\"\n{DISCOVERED_MANIFEST}");
+        let (manifest, dir) =
+            compile_fixture("strict", &manifest_text, UNTRANSLATABLE_HANDLER)?;
+        let result = generate_with(&manifest, &dir, None);
+        let generated = dir.join("generated.rs").exists();
+        fs::remove_dir_all(&dir)?;
+
+        let message = result.expect_err("compile error").to_string();
+        assert!(message.contains("widget"), "{message}");
+        assert!(message.contains("src/main.rs:4:"), "{message}");
+        assert!(message.contains("op `Nope` is not supported"), "{message}");
+        assert!(!generated);
+        Ok(())
+    }
+
+    #[test]
+    fn generate_with_strict_rejects_entries_without_handler()
+    -> Result<(), BoxError> {
+        let manifest = "id = \"me/test\"\nname = \"Test\"\ncompile = \"strict\"\n\n[[service]]\nid = \"service\"\nentry = \"service.luau\"\n";
+        let (manifest, dir) =
+            compile_fixture("strict-no-handler", manifest, COMPILED_HANDLER)?;
+        let result = generate_with(&manifest, &dir, None);
+        fs::remove_dir_all(&dir)?;
+
+        let message = result.expect_err("strict error").to_string();
+        assert!(message.contains("service"), "{message}");
+        assert!(
+            message.contains("noctalia.toml:1:1: no handler to compile"),
+            "{message}"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn generate_with_off_skips_compiler() -> Result<(), BoxError> {
+        let manifest_text = format!("compile = \"off\"\n{DISCOVERED_MANIFEST}");
+        let (manifest, dir) =
+            compile_fixture("off", &manifest_text, COMPILED_HANDLER)?;
+        let warnings = generate_with(&manifest, &dir, None)?;
+        let generated = fs::read_to_string(dir.join("generated.rs"))?;
+        let script = dir.join("luau/widget.luau").exists();
+        fs::remove_dir_all(&dir)?;
+
+        assert!(!generated.contains(".with_luau("));
+        assert!(!script);
+        assert!(warnings.is_empty());
+        Ok(())
+    }
+
+    #[test]
+    fn generate_with_env_override_wins_over_manifest() -> Result<(), BoxError> {
+        let manifest_text =
+            format!("compile = \"strict\"\n{DISCOVERED_MANIFEST}");
+        let (manifest, dir) =
+            compile_fixture("env-off", &manifest_text, UNTRANSLATABLE_HANDLER)?;
+        let warnings = generate_with(&manifest, &dir, Some("off"))?;
+        let generated = fs::read_to_string(dir.join("generated.rs"))?;
+        fs::remove_dir_all(&dir)?;
+
+        assert!(!generated.contains(".with_luau("));
+        assert!(warnings.is_empty());
+        Ok(())
+    }
+
+    #[test]
+    fn crate_modules_resolves_children_of_a_path_loaded_module()
+    -> Result<(), BoxError> {
+        let nanos = SystemTime::now().duration_since(UNIX_EPOCH)?.as_nanos();
+        let dir =
+            std::env::temp_dir().join(format!("noctalia-path-child-{nanos}"));
+        fs::create_dir_all(dir.join("src/custom"))?;
+        fs::write(
+            dir.join("src/main.rs"),
+            "#[path = \"custom/thing.rs\"]\nmod handlers;\nfn main() {}\n",
+        )?;
+        fs::write(dir.join("src/custom/thing.rs"), "mod child;\n")?;
+        fs::write(dir.join("src/custom/child.rs"), "pub const X: u32 = 1;\n")?;
+
+        let modules = crate_modules(&dir)?;
+        fs::remove_dir_all(&dir)?;
+
+        assert!(modules.iter().any(|item| item.module == "handlers"));
+        assert!(modules.iter().any(|item| item.module == "handlers::child"
+            && item.file.ends_with("child.rs")));
+        Ok(())
+    }
+
+    #[test]
+    fn crate_modules_resolves_path_relative_to_the_declaring_file()
+    -> Result<(), BoxError> {
+        let nanos = SystemTime::now().duration_since(UNIX_EPOCH)?.as_nanos();
+        let dir =
+            std::env::temp_dir().join(format!("noctalia-module-path-{nanos}"));
+        fs::create_dir_all(dir.join("src"))?;
+        fs::write(dir.join("src/main.rs"), "mod panel;\nfn main() {}\n")?;
+        fs::write(
+            dir.join("src/panel.rs"),
+            "#[path = \"panel_config.rs\"]\nmod panel_config;\n",
+        )?;
+        fs::write(
+            dir.join("src/panel_config.rs"),
+            "pub const GAP: u32 = 4;\n",
+        )?;
+
+        let modules = crate_modules(&dir)?;
+        fs::remove_dir_all(&dir)?;
+
+        assert!(modules.iter().any(|item| item.module == "panel"));
+        assert!(
+            modules
+                .iter()
+                .any(|item| item.module == "panel::panel_config"
+                    && item.file.ends_with("panel_config.rs"))
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn generate_with_rejects_unknown_compile_modes() -> Result<(), BoxError> {
+        let manifest_text =
+            format!("compile = \"fast\"\n{DISCOVERED_MANIFEST}");
+        let (manifest, dir) =
+            compile_fixture("bad-mode", &manifest_text, COMPILED_HANDLER)?;
+        let manifest_error = generate_with(&manifest, &dir, None)
+            .expect_err("invalid manifest mode")
+            .to_string();
+        let env_error = generate_with(&manifest, &dir, Some("fast"))
+            .expect_err("invalid env mode")
+            .to_string();
+        fs::remove_dir_all(&dir)?;
+
+        assert!(
+            manifest_error.contains("compile must be"),
+            "{manifest_error}"
+        );
+        assert!(
+            env_error.contains("NOCTALIA_RS_COMPILE must be"),
+            "{env_error}"
+        );
         Ok(())
     }
 }

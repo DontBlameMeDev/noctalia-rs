@@ -15,6 +15,7 @@ a plugin computes.
 ## Features
 
 - `noctalia.toml` as the source of truth for metadata, settings, and entries
+- Compiled Luau entries by default, with bridge fallback in `auto` mode
 - Version taken from `Cargo.toml` through `CARGO_PKG_VERSION`
 - No Nix requirement; Nix packaging stays optional
 - All Noctalia setting types and entry kinds
@@ -38,7 +39,7 @@ serde_json = "1.0"
 noctalia-rs-build = "0.2"
 ```
 
-For entries that keep their logic in `.luau` files, add `noctalia-rs-luau = "0.2"` to `[dependencies]`. Rust handlers do not need it.
+For Rust handlers, the dependency, `build.rs`, and `noctalia.toml` shown below are enough. Entries with a hand-written `.luau` script and no `handler` also need `noctalia-rs-luau = "0.2"` in `[dependencies]`.
 Package names and Rust library names now match. Plugin code imports `noctalia_rs::`, and `build.rs` calls `noctalia_rs_build::generate()`.
 
 Add `build.rs`:
@@ -76,8 +77,8 @@ entry = "service.luau"
 handler = "service"
 ```
 
-Each entry names a handler function in your crate. The generated plugin takes
-its version from `Cargo.toml`.
+Each entry names a handler function in your crate. The build finds that function
+in the crate source. The generated plugin takes its version from `Cargo.toml`.
 
 Declare non-code files with `assets`. Shared Luau modules go in `luau_sources`. Entries without `handler` embed the script named in `entry` automatically. Only declared files are copied into the plugin directory.
 
@@ -107,6 +108,72 @@ fn main() -> ExitCode {
     noctalia_rs::run(&plugin())
 }
 ```
+
+## Compile modes
+
+`compile` selects how Rust handlers become Luau entries. It defaults to `auto`:
+
+```toml
+compile = "auto"
+```
+
+`auto` compiles each handler it finds and emits a pure-Luau script on success.
+A handler the compiler cannot translate keeps the bridge stub, and the build
+prints one `cargo:warning` with the entry id and `file:line:column: reason`.
+`strict` fails the build on the first failure and emits no bridge. It also
+rejects entries without a handler. `off` skips the compiler and bridges every
+entry.
+
+The handler signature is `fn handler(ctx: &Context) -> Result<Vec<Op>>`. The
+build walks the module tree from `src/main.rs` or `src/lib.rs`, follows `mod`
+declarations and `#[path]`, and finds the function named by `handler`. No extra
+manifest key is needed:
+
+```toml
+[[widget]]
+id = "widget"
+entry = "widget.luau"
+handler = "widget"
+```
+
+Use `luau` only when the function lives in a file outside that module tree:
+
+```toml
+luau = "src/widget_handler.rs"
+```
+
+`NOCTALIA_RS_COMPILE` overrides the manifest so CI can gate a whole workspace:
+
+```sh
+NOCTALIA_RS_COMPILE=strict cargo build --release
+```
+
+Valid values are `strict`, `auto`, and `off`. An invalid value stops the build.
+
+The compiler reads the whole crate. It resolves calls through `crate::`,
+`self::`, `super::`, plain module paths, and simple `use` aliases. Helpers it
+can translate are inlined: a `&Context` and `&mut Vec<Op>` helper at statement
+position, a value helper in an expression, and a handler that delegates to
+another module. Helpers with early `return`s or `?` run inside a Luau function
+so those operators return from the helper, including inside nested loops.
+`Option` `?` skips on nil. `Err(...)` raises `error(...)` at the point it is
+constructed, so `?` on a `Result` needs no extra check.
+
+Closures become Luau functions, including `map`, `and_then`, `filter`,
+`is_some_and`, `unwrap_or_else`, `get_or_init`, and `call_once`. `Once`,
+`OnceLock`, `LazyLock`, `Mutex`, `RwLock`, and atomics map to Lua locals. Those
+locals live for one compiled script, not for the process, so a static shared by
+several Rust entries becomes one value per entry. Simple structs, impl methods,
+tuple bindings, `if let`, `let-else`, `matches!`, and pattern matches over
+`Option` and `Value` also compile. Event checks are folded at compile time,
+and the compiler covers config, payload, state, settings, `tr`, host reads,
+common ops, and constants. Errors name the module when they sit in an inlined
+helper.
+
+Recursive calls, arbitrary iterators, JSON parsing, callback-id ops, and Rust
+constructs with no clear Luau equivalent fail the build with `file:line:column`
+instead of being approximated.
+
 
 Build and install:
 

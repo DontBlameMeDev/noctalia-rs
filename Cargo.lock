@@ -361,6 +361,7 @@ dependencies = [
  "chrono",
  "noctalia-rs",
  "noctalia-rs-build",
+ "noctalia-rs-compiler",
  "noctalia-rs-luau",
  "serde",
  "serde_json",
@@ -380,6 +381,7 @@ name = "noctalia-rs"
 version = "0.2.1"
 dependencies = [
  "chrono",
+ "noctalia-rs-compiler",
  "noctalia-rs-macros",
  "notify",
  "serde",
@@ -392,7 +394,17 @@ dependencies = [
 name = "noctalia-rs-build"
 version = "0.2.1"
 dependencies = [
+ "noctalia-rs-compiler",
+ "syn 3.0.10",
  "toml",
+]
+
+[[package]]
+name = "noctalia-rs-compiler"
+version = "0.2.1"
+dependencies = [
+ "proc-macro2",
+ "syn 3.0.10",
 ]
 
 [[package]]
@@ -402,6 +414,7 @@ dependencies = [
  "chrono",
  "mlua",
  "noctalia-rs",
+ "noctalia-rs-compiler",
  "serde_json",
 ]
 

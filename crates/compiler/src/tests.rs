@@ -1,0 +1,2025 @@
+use crate::{EntryKind, Module, Options, compile};
+
+fn options<'a>(handler: &'a str, kind: EntryKind) -> Options<'a> {
+    Options {
+        handler,
+        entry: "widget",
+        state_key: "hello.state",
+        kind,
+        strings: &["message", "name"],
+        module: "main",
+        modules: &[],
+    }
+}
+
+fn source(handler: &str) -> String {
+    format!(
+        "use noctalia_rs::{{Context, Op, Result}};\nuse serde_json::json;\n\n{handler}\n"
+    )
+}
+
+#[test]
+fn compiles_a_hello_bar_handler() {
+    let handler = r#"
+fn widget(ctx: &Context) -> Result<Vec<Op>> {
+    if ctx.event == "render" || ctx.event == "click" {
+        let message = ctx.config_str("message")
+            .unwrap_or_default()
+            .into_owned();
+        Ok(vec![Op::BarText { text: message }])
+    } else {
+        Ok(Vec::new())
+    }
+}
+"#;
+    let compiled =
+        compile(&source(handler), &options("widget", EntryKind::Widget))
+            .expect("compiles");
+
+    assert!(compiled.source.contains("local function body_"));
+    assert!(compiled.source.contains("function update() body_"));
+    assert!(
+        compiled.source.contains(
+            "local message = (noctalia.getConfig(\"message\") or \"\")"
+        )
+    );
+    assert!(compiled.source.contains("barWidget.setText(message)"));
+    assert!(compiled.source.contains("function onClick() body_"));
+    assert!(!compiled.source.contains("require("));
+    assert!(!compiled.source.contains("bridge."));
+    assert_eq!(compiled.events, vec!["click", "render"]);
+    assert!(
+        compiled.source.len() < 3_000,
+        "hello world should stay small: {} bytes",
+        compiled.source.len()
+    );
+}
+
+#[test]
+fn compiles_a_service_with_ops_and_formatting() {
+    let handler = r#"
+fn service(ctx: &Context) -> Result<Vec<Op>> {
+    let mut ops = Vec::new();
+    let name = ctx.config_str("name").unwrap_or("bench");
+    ops.push(Op::SetInterval { ms: 1000 });
+    ops.push(Op::log(format!("{} ready", name)));
+    Ok(ops)
+}
+"#;
+    let compiled =
+        compile(&source(handler), &options("service", EntryKind::Service))
+            .expect("compiles");
+
+    assert!(compiled.source.contains("noctalia.setUpdateInterval(1000)"));
+    assert!(compiled.source.contains("noctalia.log(name .. \" ready\")"));
+    assert!(
+        compiled.source.contains(
+            "local name = (noctalia.getConfig(\"name\") or \"bench\")"
+        )
+    );
+    assert!(!compiled.source.contains("body_load"));
+    assert!(!compiled.source.contains("noctalia.state.watch(STATE_KEY"));
+}
+
+#[test]
+fn compiles_ui_trees_to_table_literals() {
+    let handler = r#"
+fn panel(ctx: &Context) -> Result<Vec<Op>> {
+    let label = ctx.state_value::<String>("label").unwrap_or_default();
+    let tree = ui::column(
+        json!({ "id": "root", "gap": 4 }),
+        vec![
+            ui::label(json!({ "id": "value", "text": label })),
+            ui::button(json!({ "id": "save", "label": "Save" })),
+        ],
+    );
+    Ok(vec![Op::PanelRender { tree }])
+}
+"#;
+    let compiled =
+        compile(&source(handler), &options("panel", EntryKind::Panel))
+            .expect("compiles");
+
+    assert!(
+        compiled
+            .source
+            .contains("local plugin_state = state.get(STATE_KEY) or {}")
+    );
+    assert!(
+        compiled
+            .source
+            .contains("local label = (plugin_state[\"label\"] or \"\")")
+    );
+    assert!(compiled.source.contains(
+        "{ kind = \"column\", props = { id = \"root\", gap = 4 }, children = {"
+    ));
+    assert!(compiled.source.contains("{ kind = \"label\", props = { id = \"value\", text = label }, children = {} }"));
+    assert!(compiled.source.contains("panel.render(tree)"));
+    assert!(compiled.source.contains("panel.setWantsSecondTicks(true)"));
+    assert!(compiled.source.contains("--!nonstrict"));
+}
+
+#[test]
+fn compiles_event_matches_into_callbacks() {
+    let handler = r#"
+fn launcher(ctx: &Context) -> Result<Vec<Op>> {
+    match ctx.event.as_str() {
+        "query" | "search" => {
+            let text = ctx.payload_str("text").unwrap_or_default();
+            Ok(vec![Op::LauncherResults { text, rows: vec![] }])
+        }
+        "activate" => {
+            let id = ctx.payload_str("id").unwrap_or_default();
+            Ok(vec![Op::log(id)])
+        }
+        _ => Ok(Vec::new()),
+    }
+}
+"#;
+    let compiled =
+        compile(&source(handler), &options("launcher", EntryKind::Launcher))
+            .expect("compiles");
+
+    assert!(compiled.source.contains("local function body_"));
+    assert!(compiled.source.contains("launcher.setResults(text, {})"));
+    assert!(compiled.source.contains("noctalia.log(id)"));
+    assert!(compiled.source.contains("function update() end"));
+    assert!(
+        compiled
+            .source
+            .contains("function onQuery(text) last_query = text; body_query(")
+    );
+    assert!(compiled.source.contains("function onSearch(text) body_"));
+    assert!(
+        compiled
+            .source
+            .contains("function onActivate(id) body_activate(")
+    );
+    assert!(compiled.source.contains("launcher.setResults(text, {})"));
+    assert!(compiled.source.contains("last_query"));
+    assert_eq!(compiled.events, vec!["activate", "query", "search"]);
+}
+
+#[test]
+fn compiles_loops_and_payload_rows() {
+    let handler = r#"
+fn update(ctx: &Context) -> Result<Vec<Op>> {
+    let rows = ctx.payload_arg(2).unwrap();
+    let mut total = 0;
+    let mut active = 0;
+    for row in rows {
+        let value = row["value"].as_i64().unwrap_or(0);
+        total += value;
+        if value >= 5 {
+            active += 1;
+        }
+    }
+    let status = format!("bench:{}:{}", total, active);
+    Ok(vec![Op::BarText { text: status }])
+}
+"#;
+    let compiled =
+        compile(&source(handler), &options("update", EntryKind::Service))
+            .expect("compiles");
+
+    assert!(compiled.source.contains("for _, row in ipairs(rows) do"));
+    assert!(
+        compiled
+            .source
+            .contains("local value = (row[\"value\"] or 0)")
+    );
+    assert!(compiled.source.contains("total += value"));
+    assert!(compiled.source.contains("barWidget.setText(status)"));
+}
+
+#[test]
+fn maps_host_reads_to_lua_globals() {
+    let handler = r#"
+fn widget(ctx: &Context) -> Result<Vec<Op>> {
+    let exists = ctx.file_exists("~/.config");
+    let command = ctx.command_exists("git");
+    let contents = ctx.read_file("~/file").unwrap_or_default();
+    let _ = ctx.write_file("~/out", "text");
+    let home = ctx.env("HOME").unwrap_or_default();
+    let path = ctx.expand_path("~/.cache").to_string_lossy().to_string();
+    let entries = ctx.list_dir("~/.cache");
+    let _ = ctx.mkdir_all("~/.cache/plugin");
+    let _ = ctx.remove_file("~/.cache/plugin/x");
+    let clock = ctx.format_time("{:%H:%M}");
+    let stamp = ctx.format_time_at("%Y", Some(0), Some("UTC"));
+    let now = ctx.os_time();
+    let _data = ctx.plugin_data_dir_result();
+    let _dir = ctx.plugin_dir_result();
+    let _ = entries;
+    Ok(vec![Op::log(format!("{} {} {} {} {} {} {} {}", exists, command, contents, home, path, clock, stamp, now))])
+}
+"#;
+    let compiled =
+        compile(&source(handler), &options("widget", EntryKind::Widget))
+            .expect("compiles");
+    assert!(compiled.source.contains("noctalia.fileExists("));
+    assert!(compiled.source.contains("noctalia.commandExists("));
+    assert!(compiled.source.contains("noctalia.readFile("));
+    assert!(compiled.source.contains("noctalia.writeFile("));
+    assert!(compiled.source.contains("noctalia.getenv("));
+    assert!(compiled.source.contains("noctalia.expandPath("));
+    assert!(compiled.source.contains("noctalia.listDir("));
+    assert!(compiled.source.contains("noctalia.mkdirAll("));
+    assert!(compiled.source.contains("noctalia.removeFile("));
+    assert!(compiled.source.contains("noctalia.formatTime("));
+    assert!(
+        compiled
+            .source
+            .contains("noctalia.formatTime(\"%Y\", (0), (\"UTC\"))")
+    );
+    assert!(compiled.source.contains("os.time()"));
+    assert!(compiled.source.contains("noctalia.pluginDataDir()"));
+    assert!(compiled.source.contains("noctalia.pluginDir()"));
+}
+
+#[test]
+fn supports_additional_methods_and_match_guards() {
+    let handler = r#"
+fn widget(ctx: &Context) -> Result<Vec<Op>> {
+    let text = ctx.config_str("message").as_deref().unwrap_or_default().to_owned();
+    let mut ops = Vec::new();
+    match ctx.event.as_str() {
+        "render" if ctx.now_ms > 0 => ops.push(Op::BarText { text }),
+        _ => {}
+    }
+    Ok(ops)
+}
+"#;
+    let compiled =
+        compile(&source(handler), &options("widget", EntryKind::Widget))
+            .expect("compiles");
+    assert!(compiled.source.contains("barWidget.setText(text)"));
+    assert!(compiled.source.contains("and"));
+}
+
+#[test]
+fn rejects_a_missing_handler() {
+    let error = compile(
+        &source("fn other(_ctx: &Context) -> Result<Vec<Op>> { Ok(vec![]) }"),
+        &options("widget", EntryKind::Widget),
+    )
+    .expect_err("missing");
+    assert!(error.message.contains("no function named `widget`"));
+}
+
+#[test]
+fn keeps_source_indentation_and_escapes() {
+    let handler = r#"
+fn widget(_ctx: &Context) -> Result<Vec<Op>> {
+    Ok(vec![
+        Op::BarText { text: "quote \" and \\ slash".to_owned() },
+        Op::log("line\nbreak"),
+    ])
+}
+"#;
+    let compiled =
+        compile(&source(handler), &options("widget", EntryKind::Widget))
+            .expect("compiles");
+    assert!(
+        compiled
+            .source
+            .contains(r#"barWidget.setText("quote \" and \\ slash")"#)
+    );
+    assert!(compiled.source.contains(r#"noctalia.log("line\nbreak")"#));
+}
+
+#[test]
+fn compiles_the_whole_op_and_host_surface() {
+    let handler = r#"
+fn handler(ctx: &Context) -> Result<Vec<Op>> {
+    let mut ops = Vec::new();
+    let flag = ctx.config_bool("flag", true);
+    let now = ctx.now_ms;
+    let entry = ctx.entry;
+    let count = ctx.state_value::<i64>("count").unwrap_or(0);
+    let name = ctx.state_value::<String>("name").unwrap_or("x");
+    let setting = ctx.setting("shell.font");
+    let color = ctx.color("primary");
+    let dark = ctx.dark_mode();
+    let vertical = ctx.bar_vertical();
+    let output = ctx.bar_output_name().unwrap_or_default();
+    let label = ctx.tr("greet.label", &[("name", name.as_str())]);
+    let clip = ctx.clipboard();
+    let stats = ctx.stats();
+    let media = ctx.media();
+    let calendar = ctx.calendar();
+    let night = ctx.nightlight();
+    let comp = ctx.compositor();
+    let bar = ctx.bar();
+    let dir = ctx.plugin_dir();
+    let data = ctx.plugin_data_dir().unwrap_or_default();
+    let status = ctx.global_state("remote");
+    let src = ctx.render_source();
+    let load = ctx.is_load_event();
+    let fmt = ctx.time_format().unwrap_or_default();
+    let date = ctx.date_format().unwrap_or_default();
+    let clock = ctx.os_clock();
+    let time = ctx.os_time();
+    let rnd = ctx.math_random();
+    let text = ctx.payload_str("text").unwrap_or_default();
+    let whole = ctx.payload;
+    let data_dir = ctx.data_dir;
+
+    ops.push(Op::Notify { title: label, body: text, options: None });
+    ops.push(Op::NotifyError { title: fmt, body: date, options: None });
+    ops.push(Op::StateSet { key: "k", value: json!({ "count": count }) });
+    ops.push(Op::TogglePanel { id: entry });
+    ops.push(Op::OpenSettings);
+    ops.push(Op::BarText { text: String::new() });
+    ops.push(Op::BarColor { role: "primary".to_owned() });
+    ops.push(Op::BarVisible { visible: flag });
+    ops.push(Op::BarTooltip { value: json!([1, 2, 3]) });
+    ops.push(Op::BarImage { path: dir, preserve: true, width: 26, height: 26 });
+    ops.push(Op::BarRender { tree: ui::row(json!({ "id": "r" }), vec![]) });
+    ops.push(Op::DesktopWidgetRender { tree: ui::scroll(json!({}), vec![ui::input(json!({})), ui::progress(json!({}))]) });
+    ops.push(Op::LayerShow { id: "layer".to_owned() });
+    ops.push(Op::LayerHide { id: "layer".to_owned() });
+    ops.push(Op::LayerRender { tree: ui::column(json!({}), vec![]) });
+    ops.push(Op::LayerConfigure { id: "layer".to_owned(), props: json!({ "a": true }) });
+    ops.push(Op::LauncherResults { text: output, rows: vec![json!({ "id": 1 })] });
+    ops.push(Op::RemoveFile { path: data });
+    ops.push(Op::HostCall { root: "noctalia".to_owned(), path: vec!["systemStats".to_owned()], args: vec![] });
+    ops.push(Op::log(format!("{} {} {} {} {} {} {} {}", now, dark, vertical, clock, time, rnd, load, src)));
+    ops.push(Op::state("k", json!({ "clip": clip, "stats": stats, "media": media, "calendar": calendar, "night": night, "comp": comp, "bar": bar, "status": status, "whole": whole, "data": data_dir, "setting": setting, "color": color })));
+    Ok(ops)
+}
+"#;
+    let compiled =
+        compile(&source(handler), &options("handler", EntryKind::Widget))
+            .expect("compiles");
+
+    for needle in [
+        "bool_or(noctalia.getConfig(\"flag\"), true)",
+        "noctalia.nowMs()",
+        "local entry = ENTRY",
+        "state[\"count\"]",
+        "noctalia.getSetting(\"shell.font\")",
+        "noctalia.getColor(\"primary\")",
+        "noctalia.isDarkMode()",
+        "barWidget.isVertical()",
+        "barWidget.outputName()",
+        "noctalia.tr(\"greet.label\", { name = name })",
+        "noctalia.clipboardText()",
+        "noctalia.systemStats()",
+        "noctalia.mediaPlayer()",
+        "noctalia.calendarEvents()",
+        "noctalia.nightlight.state",
+        "noctalia.compositor.name",
+        "noctalia.pluginDir()",
+        "noctalia.pluginDataDir()",
+        "state.get(\"remote\")",
+        "noctalia.getSetting(\"shell.time_format\")",
+        "noctalia.getSetting(\"shell.date_format\")",
+        "os.clock()",
+        "os.time()",
+        "math.random()",
+        "payload[\"text\"]",
+        "noctalia.notify(",
+        "noctalia.notifyError(",
+        "state.set(",
+        "noctalia.togglePanel(entry)",
+        "noctalia.openSettings()",
+        "barWidget.setColor(",
+        "barWidget.setVisible(flag)",
+        "barWidget.setTooltip(",
+        "barWidget.setImage(",
+        "barWidget.render(",
+        "desktopWidget.render(",
+        "noctalia.layer.show(",
+        "noctalia.layer.hide(",
+        "layer.render(",
+        "noctalia.layer.configure(",
+        "launcher.setResults(",
+        "noctalia.removeFile(",
+        "host_call(\"noctalia\", { \"systemStats\" }, {})",
+    ] {
+        assert!(
+            compiled.source.contains(needle),
+            "missing {needle}\n{}",
+            compiled.source
+        );
+    }
+}
+
+#[test]
+fn compiles_ranges_remainders_and_unwrap() {
+    let handler = r#"
+fn handler(ctx: &Context) -> Result<Vec<Op>> {
+    let rows = ctx.payload_arg(0).unwrap();
+    let mut total = 0;
+    for index in 0..3 {
+        total += index % 2;
+    }
+    for index in 0..=3 {
+        total += rows.get(index).as_i64().unwrap_or(0);
+    }
+    let text = format!("{total:?}");
+    Ok(vec![Op::log(text)])
+}
+"#;
+    let error =
+        compile(&source(handler), &options("handler", EntryKind::Service))
+            .expect_err("format spec is rejected");
+    assert!(error.message.contains("format specifiers"));
+
+    let handler = r#"
+fn handler(ctx: &Context) -> Result<Vec<Op>> {
+    let rows = ctx.payload_arg(0).unwrap();
+    let mut total = 0;
+    for index in 0..3 {
+        total += index % 2;
+    }
+    for index in 0..=3 {
+        total += rows.get(index).as_i64().unwrap_or(0);
+    }
+    Ok(vec![Op::log(format!("done {}", total))])
+}
+"#;
+    let compiled =
+        compile(&source(handler), &options("handler", EntryKind::Service))
+            .expect("compiles");
+    assert!(compiled.source.contains("for index = 0, (3) - 1 do"));
+    assert!(compiled.source.contains("for index = 0, 3 do"));
+    assert!(compiled.source.contains("irem(index, 2)"));
+    assert!(compiled.source.contains("local function irem(a, b)"));
+    assert!(compiled.source.contains("unwrap(payload.args[(0) + 1])"));
+    assert!(compiled.source.contains("local function unwrap(value)"));
+}
+
+#[test]
+fn compiles_expressions_and_rejects_untranslatable_ones() {
+    let handler = r#"
+fn handler(ctx: &Context) -> Result<Vec<Op>> {
+    let trimmed = "  x  ".trim().to_uppercase();
+    let lowered = trimmed.to_lowercase();
+    let hit = lowered.contains("x");
+    let length = lowered.len();
+    let empty = lowered.is_empty();
+    let first = lowered.as_str();
+    let option = ctx.state_value::<String>("missing");
+    let present = option.is_some();
+    let absent = option.is_none();
+    let cloned = option.clone();
+    let cast = length as f64;
+    let chosen = if hit { "yes" } else { "no" };
+    Ok(vec![Op::log(format!("{} {} {} {} {} {} {} {}", first, present, absent, cloned.unwrap_or_default(), cast, empty, chosen, ctx.state_value::<String>("x").unwrap()))])
+}
+"#;
+    let compiled =
+        compile(&source(handler), &options("handler", EntryKind::Widget))
+            .expect("compiles");
+    assert!(compiled.source.contains("string.trim(\"  x  \")"));
+    assert!(compiled.source.contains("string.upper("));
+    assert!(compiled.source.contains("string.lower("));
+    assert!(compiled.source.contains("string.find("));
+    assert!(compiled.source.contains("#lowered"));
+    assert!(compiled.source.contains("local __t1"));
+    assert!(compiled.source.contains("if hit then"));
+}
+
+#[test]
+fn rejects_constructs_outside_the_subset() {
+    for handler in [
+        "fn handler(ctx: &Context) -> Result<Vec<Op>> { let x = ctx.fuzzy_score(\"a\", \"b\"); Ok(vec![]) }",
+        "fn handler(ctx: &Context) -> Result<Vec<Op>> { match ctx.event.as_str() { other => { let _ = other; Ok(Vec::new()) } } }",
+        "fn handler(ctx: &Context) -> Result<Vec<Op>> { while ctx.now_ms > 0 { } Ok(vec![]) }",
+        "fn handler(ctx: &Context) -> Result<Vec<Op>> { let x = std::process::id(); Ok(vec![]) }",
+    ] {
+        assert!(
+            compile(&source(handler), &options("handler", EntryKind::Widget))
+                .is_err(),
+            "should reject: {handler}"
+        );
+    }
+}
+
+#[test]
+fn rejects_bad_signatures_and_duplicates() {
+    for handler in [
+        "fn handler() -> Result<Vec<Op>> { Ok(vec![]) }",
+        "fn handler(a: &Context, b: &Context) -> Result<Vec<Op>> { let _ = (a, b); Ok(vec![]) }",
+        "fn handler(ctx: &str) -> Result<Vec<Op>> { let _ = ctx; Ok(vec![]) }",
+    ] {
+        assert!(
+            compile(&source(handler), &options("handler", EntryKind::Widget))
+                .is_err(),
+            "should reject: {handler}"
+        );
+    }
+    let duplicate = "mod a { fn handler(_ctx: &Context) -> Result<Vec<Op>> { Ok(vec![]) } }\nmod b { fn handler(_ctx: &Context) -> Result<Vec<Op>> { Ok(vec![]) } }";
+    let error =
+        compile(&source(duplicate), &options("handler", EntryKind::Widget))
+            .expect_err("duplicate");
+    assert!(error.message.contains("more than once"));
+}
+
+#[test]
+fn resolves_string_and_number_constants() {
+    let handler = r#"
+pub const STATE_KEY: &str = "example.state";
+const RETRY_MS: u64 = 5000;
+
+fn handler(ctx: &Context) -> Result<Vec<Op>> {
+    let _ = ctx.now_ms;
+    Ok(vec![
+        Op::state(STATE_KEY, json!({ "retry": RETRY_MS })),
+        Op::set_interval(RETRY_MS),
+    ])
+}
+"#;
+    let compiled =
+        compile(&source(handler), &options("handler", EntryKind::Service))
+            .expect("compiles");
+    assert!(
+        compiled
+            .source
+            .contains("state.set(\"example.state\", { retry = 5000 })")
+    );
+    assert!(compiled.source.contains("noctalia.setUpdateInterval(5000)"));
+}
+
+#[test]
+fn hoists_constant_payload_tables_only_when_safe() {
+    let handler = r#"
+fn handler(ctx: &Context) -> Result<Vec<Op>> {
+    match ctx.event.as_str() {
+        "activate" => {
+            let id = ctx.payload_str("id").unwrap_or_default();
+            Ok(vec![Op::log(id)])
+        }
+        _ => Ok(Vec::new()),
+    }
+}
+"#;
+    let compiled =
+        compile(&source(handler), &options("handler", EntryKind::Service))
+            .expect("compiles");
+    assert!(compiled.source.contains("function update() end"));
+    assert!(
+        compiled
+            .source
+            .contains("function onActivate(id) body_activate(id) end")
+    );
+    assert!(
+        compiled
+            .source
+            .contains("local function body_activate(arg_id)")
+    );
+
+    let unmapped = r#"
+fn handler(ctx: &Context) -> Result<Vec<Op>> {
+    match ctx.event.as_str() {
+        "activate" => {
+            let value = ctx.payload_arg(0).unwrap_or(0);
+            Ok(vec![Op::log(format!("{value}"))])
+        }
+        _ => Ok(Vec::new()),
+    }
+}
+"#;
+    let compiled =
+        compile(&source(unmapped), &options("handler", EntryKind::Service))
+            .expect("compiles");
+    assert!(compiled.source.contains("local PAYLOAD_UPDATE"));
+    assert!(compiled.source.contains("local PAYLOAD_LOAD"));
+    assert!(compiled.source.contains("body_activate(payload)"));
+
+    let escaping = r#"
+fn handler(ctx: &Context) -> Result<Vec<Op>> {
+    Ok(vec![Op::state("payload", ctx.payload.clone())])
+}
+"#;
+    let compiled =
+        compile(&source(escaping), &options("handler", EntryKind::Service))
+            .expect("compiles");
+    assert!(!compiled.source.contains("PAYLOAD_UPDATE"));
+    assert!(compiled.source.contains(
+        "function update() body_update({ source = \"update\" }) end"
+    ));
+}
+
+#[test]
+fn unwraps_bools_without_replacing_false() {
+    let handler = r#"
+fn handler(ctx: &Context) -> Result<Vec<Op>> {
+    let on = ctx.state_value::<bool>("on").unwrap_or(true);
+    Ok(vec![Op::BarVisible { visible: on }])
+}
+"#;
+    let compiled =
+        compile(&source(handler), &options("handler", EntryKind::Widget))
+            .expect("compiles");
+    assert!(
+        compiled
+            .source
+            .contains("bool_or(plugin_state[\"on\"], true)"),
+        "{}",
+        compiled.source
+    );
+    assert!(
+        compiled
+            .source
+            .contains("local function bool_or(value, default)")
+    );
+    assert!(!compiled.source.contains("(plugin_state[\"on\"] or true)"));
+}
+
+#[test]
+fn coerces_config_and_payload_strings_like_the_context() {
+    let handler = r#"
+fn handler(ctx: &Context) -> Result<Vec<Op>> {
+    let count = ctx.config_str("count").unwrap_or_default();
+    let text = ctx.payload_str("text").unwrap_or_default();
+    Ok(vec![Op::log(format!("{count}:{text}"))])
+}
+"#;
+    let compiled =
+        compile(&source(handler), &options("handler", EntryKind::Service))
+            .expect("compiles");
+    assert!(!compiled.source.contains("str_value"));
+    assert!(compiled.source.contains("noctalia.getConfig(\"count\")"));
+    assert!(compiled.source.contains("payload[\"text\"]"));
+    assert!(compiled.source.contains("local __t"));
+    assert!(compiled.source.contains("type("));
+}
+
+#[test]
+fn rejects_local_functions_that_shadow_op_or_ui_names() {
+    for name in ["label", "state", "log", "column", "OpenSettings"] {
+        let handler = format!(
+            "fn {name}() {{}}\nfn handler(ctx: &Context) -> Result<Vec<Op>> {{ let _ = {name}(); Ok(vec![]) }}"
+        );
+        assert!(
+            compile(&source(&handler), &options("handler", EntryKind::Widget))
+                .is_err(),
+            "should reject shadowing `{name}`"
+        );
+    }
+}
+
+#[test]
+fn compiles_op_constructor_call_forms() {
+    let handler = r#"
+fn handler(ctx: &Context) -> Result<Vec<Op>> {
+    let _ = ctx.now_ms;
+    Ok(vec![
+        Op::host_call("noctalia", &["systemStats"], vec![json!(1)]),
+        Op::notify("title", "body"),
+        Op::notify_with_options("title", "body", Some(json!({ "a": 1 }))),
+        Op::notify_error("title", "body"),
+        Op::copy("text"),
+        Op::copy_with_mime("text", "text/plain"),
+        Op::open_path("/tmp/x"),
+    ])
+}
+"#;
+    let compiled =
+        compile(&source(handler), &options("handler", EntryKind::Service))
+            .expect("compiles");
+    for needle in [
+        "host_call(\"noctalia\", { \"systemStats\" }, { 1 })",
+        "noctalia.notify(\"title\", \"body\", nil)",
+        "noctalia.notify(\"title\", \"body\", { a = 1 })",
+        "noctalia.notifyError(\"title\", \"body\", nil)",
+        "noctalia.copyToClipboard(\"text\")",
+        "noctalia.copyToClipboard(\"text\", \"text/plain\")",
+        "noctalia.openPath(\"/tmp/x\")",
+        "local function host_call(root, path, args)",
+    ] {
+        assert!(
+            compiled.source.contains(needle),
+            "missing {needle}\n{}",
+            compiled.source
+        );
+    }
+}
+
+#[test]
+fn orders_mapped_payload_params_like_the_callback() {
+    let handler = r#"
+fn handler(ctx: &Context) -> Result<Vec<Op>> {
+    match ctx.event.as_str() {
+        "ipc" => {
+            let payload = ctx.payload_str("payload").unwrap_or_default();
+            let event = ctx.payload_str("event").unwrap_or_default();
+            Ok(vec![Op::log(format!("{event}={payload}"))])
+        }
+        _ => Ok(Vec::new()),
+    }
+}
+"#;
+    let compiled =
+        compile(&source(handler), &options("handler", EntryKind::Service))
+            .expect("compiles");
+    assert!(
+        compiled
+            .source
+            .contains("local function body_ipc(arg_event, arg_payload)")
+    );
+    assert!(compiled.source.contains(
+        "function onIpc(event, payload) body_ipc(event, payload) end"
+    ));
+}
+
+#[test]
+fn accepts_a_tail_return() {
+    let handler = r#"
+fn handler(ctx: &Context) -> Result<Vec<Op>> {
+    if ctx.event == "update" {
+        return Ok(vec![Op::log("tick")]);
+    } else {
+        return Ok(Vec::new());
+    }
+}
+"#;
+    let compiled =
+        compile(&source(handler), &options("handler", EntryKind::Service))
+            .expect("compiles");
+    assert!(
+        compiled
+            .source
+            .contains("function update() body_update() end")
+    );
+    assert!(compiled.source.contains("noctalia.log(\"tick\")"));
+}
+
+#[test]
+fn coerces_unmapped_payload_scalars_to_nil() {
+    let handler = r#"
+fn handler(ctx: &Context) -> Result<Vec<Op>> {
+    let missing = ctx.payload_str("hovered").is_none();
+    Ok(vec![Op::BarVisible { visible: missing }])
+}
+"#;
+    let compiled =
+        compile(&source(handler), &options("handler", EntryKind::Widget))
+            .expect("compiles");
+    assert!(compiled.source.contains("or nil) == nil)"));
+}
+
+fn module_options<'a>(
+    handler: &'a str,
+    kind: EntryKind,
+    modules: &'a [Module<'a>],
+) -> Options<'a> {
+    Options {
+        handler,
+        entry: "widget",
+        state_key: "hello.state",
+        kind,
+        strings: &["message", "name"],
+        module: "main",
+        modules,
+    }
+}
+
+#[test]
+fn inlines_a_module_handler() {
+    let main = r#"
+mod widget;
+fn widget(ctx: &Context) -> Result<Vec<Op>> {
+    widget::handle(ctx)
+}
+"#;
+    let widget = r#"
+use noctalia_rs::{Context, Op, Result};
+
+pub fn handle(ctx: &Context) -> Result<Vec<Op>> {
+    let mut ops = Vec::new();
+    ops.push(Op::BarText { text: ctx.config_str("message").unwrap_or_default().into_owned() });
+    Ok(ops)
+}
+"#;
+    let modules = [Module {
+        path: "widget",
+        source: widget,
+    }];
+    let compiled = compile(
+        &source(main),
+        &module_options("widget", EntryKind::Widget, &modules),
+    )
+    .expect("compiles");
+    assert!(compiled.source.contains(
+        "barWidget.setText((noctalia.getConfig(\"message\") or \"\"))"
+    ));
+    assert!(!compiled.source.contains("widget::handle"));
+    assert!(compiled.source.contains("do\n"));
+}
+
+#[test]
+fn inlines_a_mut_ops_helper() {
+    let handler = r#"
+fn ensure(ctx: &Context, ops: &mut Vec<Op>) {
+    if ctx.event == "render" {
+        ops.push(Op::BarText { text: "top".to_owned() });
+    }
+}
+fn widget(ctx: &Context) -> Result<Vec<Op>> {
+    let mut ops = Vec::new();
+    ensure(ctx, &mut ops);
+    ops.push(Op::log("done"));
+    Ok(ops)
+}
+"#;
+    let compiled =
+        compile(&source(handler), &options("widget", EntryKind::Widget))
+            .expect("compiles");
+    assert!(compiled.source.contains("do\n"));
+    assert!(compiled.source.contains("barWidget.setText(\"top\")"));
+    assert!(compiled.source.contains("noctalia.log(\"done\")"));
+}
+
+#[test]
+fn inlines_a_value_helper() {
+    let handler = r#"
+fn label(ctx: &Context) -> String {
+    match ctx.event.as_str() {
+        "render" => format!("shown {}", ctx.now_ms),
+        _ => "hidden".to_owned(),
+    }
+}
+fn widget(ctx: &Context) -> Result<Vec<Op>> {
+    Ok(vec![Op::BarText { text: label(ctx) }])
+}
+"#;
+    let compiled =
+        compile(&source(handler), &options("widget", EntryKind::Widget))
+            .expect("compiles");
+    assert!(compiled.source.contains("local __t1"));
+    assert!(
+        compiled
+            .source
+            .contains("__t1 = \"shown \" .. noctalia.nowMs()")
+    );
+    assert!(compiled.source.contains("barWidget.setText(__t1)"));
+}
+
+#[test]
+fn resolves_crate_self_and_super_paths() {
+    let main = r#"
+mod common;
+mod widget;
+fn widget(ctx: &Context) -> Result<Vec<Op>> {
+    Ok(vec![Op::log(common::label(ctx))])
+}
+"#;
+    let common = r#"
+use noctalia_rs::Context;
+
+pub fn label(ctx: &Context) -> String {
+    format!("{}", util::value(ctx))
+}
+
+pub fn suffix(_ctx: &Context) -> String {
+    "!".to_owned()
+}
+"#;
+    let util = r#"
+use noctalia_rs::Context;
+
+pub fn value(ctx: &Context) -> String {
+    super::suffix(ctx)
+}
+"#;
+    let modules = [
+        Module {
+            path: "common",
+            source: common,
+        },
+        Module {
+            path: "common::util",
+            source: util,
+        },
+    ];
+    let compiled = compile(
+        &source(main),
+        &module_options("widget", EntryKind::Widget, &modules),
+    )
+    .expect("compiles");
+    assert!(compiled.source.contains("noctalia.log("));
+    assert!(compiled.source.contains("\"!\""));
+}
+
+#[test]
+fn resolves_use_aliases_and_crate_paths() {
+    let main = r#"
+mod panel;
+use crate::panel::handle as panel_handler;
+"#;
+    let panel = r#"
+use noctalia_rs::{Context, Op, Result};
+
+pub fn handle(ctx: &Context) -> Result<Vec<Op>> {
+    Ok(vec![Op::log(ctx.event.as_str())])
+}
+"#;
+    let modules = [Module {
+        path: "panel",
+        source: panel,
+    }];
+    let compiled = compile(
+        &source(main),
+        &module_options("panel_handler", EntryKind::Panel, &modules),
+    )
+    .expect("compiles");
+    assert!(compiled.source.contains("noctalia.log(\"render\")"));
+}
+
+#[test]
+fn resolves_constants_across_modules() {
+    let main = r#"
+mod common;
+use crate::common::STATE;
+
+fn widget(_ctx: &Context) -> Result<Vec<Op>> {
+    Ok(vec![Op::state(STATE, json!("x"))])
+}
+"#;
+    let common = r#"
+pub const STATE: &str = "example.state";
+"#;
+    let modules = [Module {
+        path: "common",
+        source: common,
+    }];
+    let compiled = compile(
+        &source(main),
+        &module_options("widget", EntryKind::Widget, &modules),
+    )
+    .expect("compiles");
+    assert!(compiled.source.contains("state.set(\"example.state\""));
+}
+
+#[test]
+fn rejects_recursive_and_cyclic_helpers() {
+    let handler = r#"
+fn first(ctx: &Context, ops: &mut Vec<Op>) {
+    second(ctx, ops);
+}
+fn second(ctx: &Context, ops: &mut Vec<Op>) {
+    first(ctx, ops);
+}
+fn widget(ctx: &Context) -> Result<Vec<Op>> {
+    let mut ops = Vec::new();
+    first(ctx, &mut ops);
+    Ok(ops)
+}
+"#;
+    let error =
+        compile(&source(handler), &options("widget", EntryKind::Widget))
+            .expect_err("cycle");
+    assert!(
+        error.message.contains("recursive helper"),
+        "{}",
+        error.message
+    );
+}
+
+#[test]
+fn supports_early_return_and_question_mark_in_helpers() {
+    for helper in [
+        "fn helper(ctx: &Context, ops: &mut Vec<Op>) { if ctx.now_ms > 0 { return; } ops.push(Op::log(\"x\")); }",
+        "fn helper(ctx: &Context, ops: &mut Vec<Op>) { let value = ctx.config_str(\"message\")?; ops.push(Op::log(value)); }",
+    ] {
+        let handler = format!(
+            "{helper}\nfn widget(ctx: &Context) -> Result<Vec<Op>> {{\n    let mut ops = Vec::new();\n    if ctx.event == \"render\" {{ helper(ctx, &mut ops); }}\n    Ok(ops)\n}}\n"
+        );
+        let compiled =
+            compile(&source(&handler), &options("widget", EntryKind::Widget))
+                .expect("compiles");
+        assert!(compiled.source.contains("(function()"));
+        assert!(compiled.source.contains("end)()"));
+    }
+}
+
+#[test]
+fn compiles_closures_in_helpers() {
+    let helper = "fn helper(ctx: &Context, ops: &mut Vec<Op>) { let find = |a: i64| a; let _ = find(1); }";
+    let handler = format!(
+        "{helper}\nfn widget(ctx: &Context) -> Result<Vec<Op>> {{\n    let mut ops = Vec::new();\n    if ctx.event == \"render\" {{ helper(ctx, &mut ops); ops.push(Op::log(\"x\")); }}\n    Ok(ops)\n}}\n"
+    );
+    let compiled =
+        compile(&source(&handler), &options("widget", EntryKind::Widget))
+            .expect("compiles");
+    assert!(compiled.source.contains("function(a)"));
+}
+
+#[test]
+fn rejects_mut_borrows_that_cannot_be_inlined() {
+    let handler = r#"
+fn helper(word: &mut String) {
+    word.push('x');
+}
+fn widget(ctx: &Context) -> Result<Vec<Op>> {
+    let mut word = String::new();
+    helper(&mut word);
+    Ok(vec![Op::log(word)])
+}
+"#;
+    let error =
+        compile(&source(handler), &options("widget", EntryKind::Widget))
+            .expect_err("bail");
+    assert!(error.message.contains("&mut"), "{}", error.message);
+}
+
+#[test]
+fn rejects_unresolved_module_calls() {
+    let handler = r#"
+fn widget(ctx: &Context) -> Result<Vec<Op>> {
+    missing::handle(ctx)
+}
+"#;
+    let error =
+        compile(&source(handler), &options("widget", EntryKind::Widget))
+            .expect_err("bail");
+    assert!(
+        error.message.contains("call to `missing::handle`"),
+        "{}",
+        error.message
+    );
+}
+
+#[test]
+fn rejects_callback_ops_with_a_reason() {
+    let handler = r#"
+fn widget(_ctx: &Context) -> Result<Vec<Op>> {
+    Ok(vec![Op::run(json!("true"), None)])
+}
+"#;
+    let error =
+        compile(&source(handler), &options("widget", EntryKind::Widget))
+            .expect_err("bail");
+    assert!(error.message.contains("callback id"), "{}", error.message);
+}
+
+#[test]
+fn reports_positions_from_the_helper_module() {
+    let main = r#"
+mod widget;
+fn widget(ctx: &Context) -> Result<Vec<Op>> {
+    widget::handle(ctx)
+}
+"#;
+    let widget = r#"
+use noctalia_rs::{Context, Op, Result};
+
+pub fn handle(_ctx: &Context) -> Result<Vec<Op>> {
+    let bad = std::process::id();
+    let _ = bad;
+    Ok(Vec::new())
+}
+"#;
+    let modules = [Module {
+        path: "widget",
+        source: widget,
+    }];
+    let error = compile(
+        &source(main),
+        &module_options("widget", EntryKind::Widget, &modules),
+    )
+    .expect_err("bail");
+    assert_eq!(
+        error.render("main.rs"),
+        format!("widget:{}:{}: {}", error.line, error.column, error.message)
+    );
+    assert!(error.line > 0);
+}
+
+#[test]
+fn finds_a_handler_in_an_inline_module() {
+    let handler = r#"
+mod inner {
+    pub fn widget(_ctx: &Context) -> Result<Vec<Op>> {
+        Ok(vec![Op::log("inner")])
+    }
+}
+"#;
+    let compiled =
+        compile(&source(handler), &options("widget", EntryKind::Widget))
+            .expect("compiles");
+    assert!(compiled.source.contains("noctalia.log(\"inner\")"));
+}
+
+#[test]
+fn resolves_self_paths_glob_imports_and_super_chains() {
+    let main = r#"
+mod outer;
+use crate::shared::*;
+fn widget(ctx: &Context) -> Result<Vec<Op>> {
+    Ok(vec![Op::log(self::local(ctx)), Op::log(globbed(ctx))])
+}
+fn local(_ctx: &Context) -> String {
+    "local".to_owned()
+}
+"#;
+    let outer = r#"
+mod inner;
+
+pub fn label(ctx: &Context) -> String {
+    super::super::local(ctx)
+}
+"#;
+    let inner = r#"
+use crate::outer::label;
+use noctalia_rs::Context;
+
+pub fn deep(ctx: &Context) -> String {
+    self::suffix(ctx)
+}
+
+fn suffix(_ctx: &Context) -> String {
+    label(ctx)
+}
+"#;
+    let shared = r#"
+use noctalia_rs::Context;
+
+pub fn globbed(_ctx: &Context) -> String {
+    "glob".to_owned()
+}
+"#;
+    let modules = [
+        Module {
+            path: "outer",
+            source: outer,
+        },
+        Module {
+            path: "outer::inner",
+            source: inner,
+        },
+        Module {
+            path: "shared",
+            source: shared,
+        },
+    ];
+    let compiled = compile(
+        &source(main),
+        &module_options("widget", EntryKind::Widget, &modules),
+    )
+    .expect("compiles");
+    assert!(compiled.source.contains("\"local\""));
+    assert!(compiled.source.contains("\"glob\""));
+}
+
+#[test]
+fn resolves_constants_through_self_and_super() {
+    let main = r#"
+mod common;
+fn widget(_ctx: &Context) -> Result<Vec<Op>> {
+    Ok(vec![Op::state(common::STATE, json!("x"))])
+}
+"#;
+    let common = r#"
+pub const STATE: &str = "example.state";
+pub mod nested {
+    pub const KEY: &str = "nested.key";
+}
+"#;
+    let modules = [Module {
+        path: "common",
+        source: common,
+    }];
+    let compiled = compile(
+        &source(main),
+        &module_options("widget", EntryKind::Widget, &modules),
+    )
+    .expect("compiles");
+    assert!(compiled.source.contains("state.set(\"example.state\""));
+}
+
+#[test]
+fn inlines_vec_ops_helpers_and_final_returns() {
+    let handler = r#"
+fn build(ctx: &Context) -> Vec<Op> {
+    let mut ops = Vec::new();
+    ops.push(Op::log(ctx.event.as_str()));
+    ops
+}
+fn offset(ctx: &Context) -> i64 {
+    return ctx.now_ms;
+}
+fn widget(ctx: &Context) -> Result<Vec<Op>> {
+    let now = offset(ctx);
+    Ok(build(ctx))
+}
+"#;
+    let compiled =
+        compile(&source(handler), &options("widget", EntryKind::Widget))
+            .expect("compiles");
+    assert!(compiled.source.contains("noctalia.log(\"render\")"));
+}
+
+#[test]
+fn covers_more_methods_and_guarded_wildcards() {
+    let handler = r#"
+fn widget(ctx: &Context) -> Result<Vec<Op>> {
+    let mut rows = Vec::new();
+    rows.extend(vec![json!("a"), json!("b")]);
+    let shown = ctx.expand_path("~/x").display().to_string();
+    let mut ops = Vec::new();
+    match ctx.event.as_str() {
+        "render" | "click" => ops.push(Op::log(shown)),
+        _ if ctx.now_ms > 0 => ops.push(Op::log("later")),
+        _ => {}
+    }
+    let _ = rows;
+    Ok(ops)
+}
+"#;
+    let compiled =
+        compile(&source(handler), &options("widget", EntryKind::Widget))
+            .expect("compiles");
+    assert!(compiled.source.contains("ipairs("));
+    assert!(compiled.source.contains("elseif (true) and ("));
+}
+
+#[test]
+fn rejects_inline_signature_mismatches() {
+    for handler in [
+        r#"
+fn helper(ctx: &Context) {}
+fn widget(ctx: &Context) -> Result<Vec<Op>> {
+    helper(ctx, ctx);
+    Ok(Vec::new())
+}
+"#,
+        r#"
+fn helper(other: &Context) { let _ = other; }
+fn widget(ctx: &Context) -> Result<Vec<Op>> {
+    helper(missing);
+    Ok(Vec::new())
+}
+"#,
+        r#"
+fn helper(ops: &mut Vec<Op>) {}
+fn widget(ctx: &Context) -> Result<Vec<Op>> {
+    helper(&mut Vec::new());
+    Ok(Vec::new())
+}
+"#,
+        r#"
+fn helper(ctx: &Context) -> Result<String> { Ok(String::new()) }
+fn widget(ctx: &Context) -> Result<Vec<Op>> {
+    helper(ctx)
+}
+"#,
+        r#"
+fn helper(ctx: &Context) -> Vec<Op> { Vec::new() }
+fn widget(ctx: &Context) -> Result<Vec<Op>> {
+    helper(ctx)
+}
+"#,
+        r#"
+fn helper(ctx: &Context) -> Result<Vec<Op>> { Ok(Vec::new()) }
+fn widget(ctx: &Context) -> Result<Vec<Op>> {
+    let value = helper(ctx);
+    Ok(value)
+}
+"#,
+        r#"
+fn helper(ctx: &Context) -> String { "x".to_owned() }
+fn widget(ctx: &Context) -> Result<Vec<Op>> {
+    helper(ctx);
+    Ok(Vec::new())
+}
+"#,
+        r#"
+fn helper(ctx: &Context) -> String { let _ = ctx; }
+fn widget(ctx: &Context) -> Result<Vec<Op>> {
+    let value = helper(ctx);
+    Ok(vec![Op::log(value)])
+}
+"#,
+    ] {
+        assert!(
+            compile(&source(handler), &options("widget", EntryKind::Widget))
+                .is_err(),
+            "should bail: {handler}"
+        );
+    }
+}
+
+#[test]
+fn rejects_inline_depth_and_unsupported_ops() {
+    let mut handler = String::new();
+    for index in 0..10 {
+        handler.push_str(&format!(
+            "fn helper{index}(ctx: &Context, ops: &mut Vec<Op>) {{\n    helper{}(ctx, ops);\n}}\n",
+            index + 1
+        ));
+    }
+    handler.push_str("fn helper10(_ctx: &Context, _ops: &mut Vec<Op>) {}\n");
+    handler.push_str(
+        "fn widget(ctx: &Context) -> Result<Vec<Op>> {\n    let mut ops = Vec::new();\n    helper0(ctx, &mut ops);\n    Ok(ops)\n}\n",
+    );
+    let error =
+        compile(&source(&handler), &options("widget", EntryKind::Widget))
+            .expect_err("depth");
+    assert!(error.message.contains("depth limit"), "{}", error.message);
+
+    let handler = r#"
+fn widget(_ctx: &Context) -> Result<Vec<Op>> {
+    Ok(vec![Op::http(json!({}))])
+}
+"#;
+    let error =
+        compile(&source(handler), &options("widget", EntryKind::Widget))
+            .expect_err("http");
+    assert!(error.message.contains("callback id"), "{}", error.message);
+}
+
+#[test]
+fn rejects_parse_errors_and_renders_them() {
+    let error = compile(
+        "fn widget(ctx: &Context) -> Result<Vec<Op>> { Ok(vec![Op::Nope]) }",
+        &options("widget", EntryKind::Widget),
+    )
+    .expect_err("op");
+    assert!(error.line > 0);
+    assert!(error.to_string().contains("line "));
+    assert!(error.render("main.rs").contains("main.rs:"));
+    let plain = crate::Error::plain("plain");
+    assert_eq!(plain.render("main.rs"), "main.rs: plain");
+    let parse = compile("fn {", &options("widget", EntryKind::Widget))
+        .expect_err("parse");
+    assert!(parse.render("main.rs").contains("main:"));
+}
+
+#[test]
+fn formats_time_at_with_optional_arguments() {
+    let handler = r#"
+fn widget(ctx: &Context) -> Result<Vec<Op>> {
+    let short = ctx.format_time_at("%H", Some(0));
+    let long = ctx.format_time_at("%H", Some(0), Some("UTC"));
+    Ok(vec![Op::log(format!("{} {}", short, long))])
+}
+"#;
+    let compiled =
+        compile(&source(handler), &options("widget", EntryKind::Widget))
+            .expect("compiles");
+    assert!(
+        compiled
+            .source
+            .contains("noctalia.formatTime(\"%H\", (0), nil)")
+    );
+    assert!(
+        compiled
+            .source
+            .contains("noctalia.formatTime(\"%H\", (0), (\"UTC\"))")
+    );
+}
+
+#[test]
+fn wraps_early_returns_in_an_iife_inside_nested_loops() {
+    let handler = r#"
+fn helper(ops: &mut Vec<Op>) {
+    for index in 0..3 {
+        if index == 1 {
+            return;
+        }
+        ops.push(Op::log(format!("{}", index)));
+    }
+}
+fn widget(ctx: &Context) -> Result<Vec<Op>> {
+    let mut ops = Vec::new();
+    helper(&mut ops);
+    Ok(ops)
+}
+"#;
+    let compiled =
+        compile(&source(handler), &options("widget", EntryKind::Widget))
+            .expect("compiles");
+    assert!(compiled.source.contains("(function()"));
+    assert!(compiled.source.contains("end)()"));
+    assert!(compiled.source.contains("for index = 0, (3) - 1 do"));
+}
+
+#[test]
+fn lowers_question_mark_on_options_and_results() {
+    let handler = r#"
+fn option(ctx: &Context, ops: &mut Vec<Op>) {
+    let value = ctx.config_str("message")?;
+    ops.push(Op::log(value));
+}
+fn result(ctx: &Context) -> Result<i64> { Ok(ctx.now_ms) }
+fn value(ctx: &Context, ops: &mut Vec<Op>) {
+    let now = result(ctx)?;
+    ops.push(Op::log(format!("{}", now)));
+}
+fn widget(ctx: &Context) -> Result<Vec<Op>> {
+    let mut ops = Vec::new();
+    option(ctx, &mut ops);
+    value(ctx, &mut ops);
+    Ok(ops)
+}
+"#;
+    let compiled =
+        compile(&source(handler), &options("widget", EntryKind::Widget))
+            .expect("compiles");
+    assert!(compiled.source.contains("== nil then return end"));
+}
+
+#[test]
+fn compiles_once_guards_and_once_locks() {
+    let handler = r#"
+use std::sync::{Once, OnceLock};
+static VALUE: OnceLock<String> = OnceLock::new();
+static ONCE: Once = Once::new();
+fn widget(ctx: &Context) -> Result<Vec<Op>> {
+    let mut ops = Vec::new();
+    let value = VALUE.get_or_init(|| "ready".to_owned());
+    ONCE.call_once(|| ops.push(Op::log("once")));
+    VALUE.set("later".to_owned());
+    ops.push(Op::log(value));
+    ops.push(Op::log(format!("{}", ctx.event.as_str())));
+    Ok(ops)
+}
+"#;
+    let compiled =
+        compile(&source(handler), &options("widget", EntryKind::Widget))
+            .expect("compiles");
+    assert!(compiled.source.contains("local __static_main__VALUE"));
+    assert!(
+        compiled
+            .source
+            .contains("if __static_main__VALUE == nil then")
+    );
+    assert!(compiled.source.contains("if not __static_main__ONCE then"));
+    assert!(compiled.source.contains("__static_main__ONCE = true"));
+}
+
+#[test]
+fn compiles_option_combinators_with_closures() {
+    let handler = r#"
+fn widget(ctx: &Context) -> Result<Vec<Op>> {
+    let value = ctx.config_str("message").map(|text| text.to_uppercase());
+    let bool_value = ctx.config_str("message").and_then(Value::as_bool);
+    let kept = ctx.config_str("message").filter(|text| !text.is_empty());
+    let fallback = ctx.config_str("message").unwrap_or_else(|| "none".to_owned());
+    Ok(vec![Op::log(format!("{} {} {} {}", value.unwrap_or_default(), bool_value.unwrap_or(false), kept.unwrap_or_default(), fallback))])
+}
+"#;
+    let compiled =
+        compile(&source(handler), &options("widget", EntryKind::Widget))
+            .expect("compiles");
+    assert!(compiled.source.contains("~= nil then"));
+    assert!(compiled.source.contains("function(__value)"));
+    assert!(!compiled.source.contains("not text.is_empty"));
+}
+
+#[test]
+fn compiles_if_let_matches_and_tuple_bindings() {
+    let handler = r#"
+fn widget(ctx: &Context) -> Result<Vec<Op>> {
+    let (first, second) = ("a", "b");
+    if let Some(value) = ctx.config_str("message") {
+        if matches!(value.as_str(), Some(_)) {
+            return Ok(vec![Op::log(format!("{}{}", first, second))]);
+        }
+    }
+    let Some(fallback) = ctx.config_str("message") else {
+        return Ok(vec![Op::log("fallback")]);
+    };
+    Ok(vec![Op::log(fallback)])
+}
+"#;
+    let compiled =
+        compile(&source(handler), &options("widget", EntryKind::Widget))
+            .expect("compiles");
+    assert!(compiled.source.contains("local first, second ="));
+    assert!(compiled.source.contains("if (value ~= nil) then"));
+    assert!(!compiled.source.contains("if __static"));
+}
+
+#[test]
+fn bails_on_constructs_without_a_safe_translation() {
+    for handler in [
+        "fn widget(_ctx: &Context) -> Result<Vec<Op>> { Ok(vec![Op::run(json!(\"x\"), None)]) }",
+        "fn widget(_ctx: &Context) -> Result<Vec<Op>> { let value = serde_json::from_str::<serde_json::Value>(\"{}\")?; let _ = value; Ok(vec![]) }",
+        "fn widget(_ctx: &Context) -> Result<Vec<Op>> { other = 1; Ok(vec![]) }",
+    ] {
+        let error =
+            compile(&source(handler), &options("widget", EntryKind::Widget))
+                .expect_err("bail");
+        assert!(error.line > 0 && error.column > 0);
+        assert!(!error.message.is_empty());
+    }
+}
+
+#[test]
+fn covers_static_containers_and_atomic_operations() {
+    let handler = r#"
+use std::sync::{Once, OnceLock, Mutex, RwLock, atomic::{AtomicBool, AtomicU64, Ordering}};
+static FLAG: Once = Once::new();
+static CELL: OnceLock<String> = OnceLock::new();
+static LOCK: Mutex<i64> = Mutex::new(1);
+static RW: RwLock<i64> = RwLock::new(2);
+static BOOL: AtomicBool = AtomicBool::new(false);
+static COUNT: AtomicU64 = AtomicU64::new(0);
+fn widget(ctx: &Context) -> Result<Vec<Op>> {
+    let mut ops = Vec::new();
+    FLAG.call_once(|| ops.push(Op::log("once")));
+    let value = CELL.get_or_init(|| "init".to_owned());
+    CELL.set("set".to_owned());
+    let _ = CELL.take();
+    let _ = LOCK.lock().unwrap();
+    let _ = RW.read().unwrap();
+    let _ = RW.write().unwrap();
+    BOOL.store(true, Ordering::SeqCst);
+    let _ = BOOL.load(Ordering::SeqCst);
+    let _ = COUNT.swap(1, Ordering::SeqCst);
+    let _ = COUNT.fetch_add(1, Ordering::SeqCst);
+    let _ = COUNT.fetch_sub(1, Ordering::SeqCst);
+    ops.push(Op::log(value));
+    Ok(ops)
+}
+"#;
+    let compiled =
+        compile(&source(handler), &options("widget", EntryKind::Widget))
+            .expect("compiles");
+    assert!(compiled.source.contains("__static_main__CELL"));
+}
+
+#[test]
+fn covers_impl_methods_and_struct_fields() {
+    let handler = r#"
+struct State { name: String, count: i64 }
+impl State {
+    fn new(ctx: &Context) -> State { State { name: ctx.config_str("message").unwrap_or_default().into_owned(), count: 0 } }
+    fn bump(&mut self, amount: i64) { self.count += amount; }
+    fn label(&self) -> String { self.name.clone() }
+}
+fn widget(ctx: &Context) -> Result<Vec<Op>> {
+    let mut state = State::new(ctx);
+    state.bump(2);
+    let label = state.label();
+    state.name = "changed".to_owned();
+    Ok(vec![Op::log(label)])
+}
+"#;
+    let compiled =
+        compile(&source(handler), &options("widget", EntryKind::Widget))
+            .expect("compiles");
+    assert!(compiled.source.contains("self.count += amount"));
+    assert!(compiled.source.contains("state.name ="));
+}
+
+#[test]
+fn covers_all_option_combinators() {
+    let handler = r#"
+fn widget(ctx: &Context) -> Result<Vec<Op>> {
+    let base = ctx.config_str("message");
+    let mapped = base.clone().map(|value| value.to_uppercase());
+    let chained = base.clone().and_then(Value::as_str);
+    let filtered = base.clone().filter(|value| !value.is_empty());
+    let some = base.clone().is_some_and(|value| value == "x");
+    let or = base.clone().map_or("default".to_owned(), |value| value);
+    let or_else = base.clone().map_or_else(|| "fallback".to_owned(), |value| value);
+    let fallback = base.clone().unwrap_or_else(|| "none".to_owned());
+    let alt = base.clone().or_else(|| Some("alt".to_owned()));
+    let result = base.clone().ok_or("missing");
+    let result2 = base.clone().ok_or_else(|| "missing");
+    Ok(vec![Op::log(format!("{} {} {} {} {} {} {} {} {} {}", mapped.unwrap_or(""), chained.unwrap_or(""), filtered.unwrap_or(""), some, or, or_else, fallback, alt.unwrap_or(""), result.unwrap_or(""), result2.unwrap_or("")))])
+}
+"#;
+    let compiled =
+        compile(&source(handler), &options("widget", EntryKind::Widget))
+            .expect("compiles");
+    assert!(compiled.source.contains("function(__value)"));
+}
+
+#[test]
+fn covers_match_and_matches_patterns() {
+    let handler = r#"
+enum Mode { Fast, Slow }
+fn classify(value: Option<&Value>, mode: &str) -> String {
+    match value {
+        Some(Value::Number(number)) => number.to_string(),
+        Some(Value::String(text)) => text.trim().to_owned(),
+        Some(Value::Bool(flag)) => flag.to_string(),
+        Some(Value::Object(map)) => map.len().to_string(),
+        Some(Value::Array(items)) => items.len().to_string(),
+        None => "none".to_owned(),
+        Some(Value::Null) => "null".to_owned(),
+    }
+}
+fn widget(ctx: &Context) -> Result<Vec<Op>> {
+    let value = ctx.config_str("message").and_then(Value::as_str);
+    let label = classify(value, "Fast");
+    let known = matches!(label.as_str(), "Fast" | "Slow");
+    let object = matches!(label.as_str(), "" );
+    let mode = Mode::Fast;
+    let other = match mode { Mode::Fast => "f", Mode::Slow => "s" };
+    Ok(vec![Op::log(format!("{}{}{}{}", label, known, object, other))])
+}
+"#;
+    let compiled =
+        compile(&source(handler), &options("widget", EntryKind::Widget))
+            .expect("compiles");
+    assert!(compiled.source.contains("type("));
+}
+
+#[test]
+fn covers_expression_subset_additions() {
+    let handler = r#"
+fn widget(ctx: &Context) -> Result<Vec<Op>> {
+    let (first, _, third) = ("a", "b", "c");
+    let map = std::collections::HashMap::new();
+    let set = std::collections::BTreeSet::new();
+    let null = Value::Null;
+    let boolean = Value::Bool(true);
+    let number = Value::Number(1.0);
+    let tree = ui::node("box", json!({ "id": "root" }), vec![]);
+    let key = "message";
+    let from_config = ctx.config.get(key);
+    let indexed = ctx.config["message"];
+    let number_value = from_config.and_then(Value::as_f64).unwrap_or(0.0);
+    if let Some(text) = ctx.config_str("message") {
+        let wrapped = &text;
+        let value = *wrapped;
+        Ok(vec![Op::log(format!("{}{}{}{}{}{}{}{}", first, third, map.len(), set.len(), number, boolean, tree.kind, number_value + value.len() as f64))])
+    } else {
+        let Some(fallback) = indexed.and_then(Value::as_str) else {
+            return Ok(vec![Op::log("fallback")]);
+        };
+        Ok(vec![Op::log(fallback)])
+    }
+}
+"#;
+    let compiled =
+        compile(&source(handler), &options("widget", EntryKind::Widget))
+            .expect("compiles");
+    assert!(compiled.source.contains("noctalia.getConfig"));
+}
+
+#[test]
+fn covers_static_initializers_and_remaining_methods() {
+    let handler = r#"
+use std::cell::{Cell, RefCell};
+use std::sync::{LazyLock, Mutex, atomic::{AtomicBool, Ordering}};
+struct Config { enabled: bool, name: String }
+static CONFIG: Mutex<Config> = Mutex::new(Config { enabled: true, name: "ready" });
+static LAZY: LazyLock<String> = LazyLock::new(|| "lazy".to_owned());
+static CELL: Cell<i64> = Cell::new(1);
+static REF: RefCell<String> = RefCell::new("shared".to_owned());
+static FLAG: AtomicBool = AtomicBool::new(true);
+fn widget(ctx: &Context) -> Result<Vec<Op>> {
+    let value = LAZY.deref();
+    let cell = CELL.get();
+    let shared = REF.borrow();
+    let enabled = FLAG.load(Ordering::SeqCst);
+    let config = CONFIG.lock().unwrap();
+    let mut optional: Option<String> = None;
+    let inserted = optional.get_or_insert("inserted".to_owned());
+    let parsed = ctx.config_str("message").and_then(|text| text.parse::<f64>().ok());
+    let expected = ctx.config_str("message").expect("missing");
+    let map = std::collections::BTreeMap::new();
+    let set = std::collections::HashSet::new();
+    let list = std::collections::HashMap::new();
+    Ok(vec![Op::log(format!("{}{}{}{}{}{}{}{}{}{}{}", value, cell, shared, enabled, config.enabled, inserted, parsed.unwrap_or(0.0), expected, map.len(), set.len(), list.len()))])
+}
+"#;
+    let compiled =
+        compile(&source(handler), &options("widget", EntryKind::Widget))
+            .expect("compiles");
+    assert!(compiled.source.contains("local __static_main__CONFIG"));
+}
+
+#[test]
+fn covers_local_statics_and_guard_helpers() {
+    let handler = r#"
+use std::sync::{Once, OnceLock};
+fn guard(ctx: &Context, ops: &mut Vec<Op>) {
+    static LOCAL_ONCE: Once = Once::new();
+    static LOCAL_VALUE: OnceLock<String> = OnceLock::new();
+    LOCAL_ONCE.call_once(|| ops.push(Op::log("local")));
+    let value = LOCAL_VALUE.get_or_init(|| ctx.tr("key", &[]));
+    ops.push(Op::log(value));
+}
+fn widget(ctx: &Context) -> Result<Vec<Op>> {
+    let mut ops = Vec::new();
+    guard(ctx, &mut ops);
+    Ok(ops)
+}
+"#;
+    let compiled =
+        compile(&source(handler), &options("widget", EntryKind::Widget))
+            .expect("compiles");
+    assert!(compiled.source.contains("__local_"));
+}
+
+#[test]
+fn covers_more_match_variants_and_bails() {
+    let handler = r#"
+fn widget(ctx: &Context) -> Result<Vec<Op>> {
+    let value = ctx.config_str("message").and_then(Value::as_str);
+    let label = match value {
+        Some("yes") => "on",
+        Some(_) => "other",
+        None => "off",
+    };
+    let tuple = match value { Some(text) => (text, 1), None => ("none", 0) };
+    let flag = matches!(value, Some(_) | None);
+    Ok(vec![Op::log(format!("{}{}{}{}", label, tuple.0, tuple.1, flag))])
+}
+"#;
+    let compiled =
+        compile(&source(handler), &options("widget", EntryKind::Widget))
+            .expect("compiles");
+    assert!(compiled.source.contains("tuple[1]"));
+}
+
+#[test]
+fn covers_additional_bail_and_expression_branches() {
+    for handler in [
+        "fn widget(ctx: &Context) -> Result<Vec<Op>> { let value = ctx.config_str(\"message\").map_err(|e| e); let _ = value; Ok(vec![]) }",
+        "fn widget(ctx: &Context) -> Result<Vec<Op>> { let value = ctx.config_str(\"message\").map(|a: i64, b: i64| a + b); let _ = value; Ok(vec![]) }",
+        "fn widget(ctx: &Context) -> Result<Vec<Op>> { static X: std::sync::OnceLock<String> = std::sync::OnceLock::new(); X.compare_exchange(1, 2); Ok(vec![]) }",
+        "fn widget(ctx: &Context) -> Result<Vec<Op>> { let f = |(a, b): (i64, i64)| a + b; let _ = f; Ok(vec![]) }",
+    ] {
+        let error =
+            compile(&source(handler), &options("widget", EntryKind::Widget))
+                .expect_err("bail");
+        assert!(!error.message.is_empty());
+    }
+    let handler = r#"
+struct State { count: i64 }
+impl State {
+    fn new() -> State { State { count: 1 } }
+    fn empty(&self) -> bool { self.count == 0 }
+}
+fn widget(_ctx: &Context) -> Result<Vec<Op>> {
+    let state = State::new();
+    let empty = state.empty();
+    let (a, b) = (1, 2);
+    if let value = Some(a) {
+        let Some(text) = Some("x") else { return Ok(vec![]); };
+        return Ok(vec![Op::log(format!("{}{}{}{}", empty, a, b, text))]);
+    }
+    Ok(vec![])
+}
+"#;
+    let compiled =
+        compile(&source(handler), &options("widget", EntryKind::Widget))
+            .expect("compiles");
+    assert!(compiled.source.contains("local a, b ="));
+}
+
+#[test]
+fn emits_closures_as_lua_functions() {
+    let handler = r#"
+fn widget(ctx: &Context) -> Result<Vec<Op>> {
+    let double = |value: i64| value * 2;
+    let add = |left: i64, right: i64| { left + right };
+    let first = double(2);
+    let second = add(1, 2);
+    let ignored = |_value: i64| 0;
+    let third = ignored(1);
+    Ok(vec![Op::log(ctx.tr("key", &[("first", json!(first)), ("second", json!(second)), ("third", json!(third))]))])
+}
+"#;
+    let compiled =
+        compile(&source(handler), &options("widget", EntryKind::Widget))
+            .expect("compiles");
+    assert!(compiled.source.contains("function(value)"));
+    assert!(compiled.source.contains("function(left, right)"));
+    assert!(compiled.source.contains("double(2)"));
+}
+
+#[test]
+fn covers_remaining_expression_and_error_paths() {
+    let handler = r#"
+use std::sync::OnceLock;
+struct State { count: i64 }
+impl State {
+    fn new(value: i64) -> State { State { count: value } }
+    fn bump(&mut self, amount: i64, extra: i64) { self.count += amount + extra; }
+}
+fn widget(ctx: &Context) -> Result<Vec<Op>> {
+    let state = State::new(1);
+    let mut mutable = state;
+    mut_helper(&mut mutable, ctx);
+    let cell: OnceLock<String> = OnceLock::new();
+    let _ = cell.get();
+    let value = ctx.config.get("message");
+    let indexed = ctx.config["name"];
+    let object = value.and_then(Value::as_object);
+    let number = value.and_then(Value::as_f64);
+    let flag = matches!(value, Value::Null | Some(Value::Bool(false)));
+    let tuple = match value { Some(text) => (text.to_string(), 1), None => ("none".to_owned(), 0) };
+    let tree = ui::node("box", json!({}), vec![]);
+    Ok(vec![Op::log(format!("{}{}{}{}{}{}{}", mutable.count, object.is_some(), number.is_some(), flag, tuple.0, tuple.1, tree.kind))])
+}
+fn mut_helper(state: &mut State, _ctx: &Context) {
+    state.bump(1, 2);
+}
+"#;
+    for handler in [
+        "struct State { count: i64 } impl State { fn new() -> State { State { count: 1 } } } fn widget(_ctx: &Context) -> Result<Vec<Op>> { let s = State::new(2); let _ = s; Ok(vec![]) }",
+        "struct State { count: i64 } impl State { fn bump(&self, a: i64, b: i64) { let _ = (a, b); } } fn widget(_ctx: &Context) -> Result<Vec<Op>> { let s = State { count: 1 }; s.bump(1); Ok(vec![]) }",
+    ] {
+        let error =
+            compile(&source(handler), &options("widget", EntryKind::Widget))
+                .expect_err("bail");
+        assert!(error.line > 0);
+    }
+
+    let compiled =
+        compile(&source(handler), &options("widget", EntryKind::Widget))
+            .expect("compiles");
+    assert!(compiled.source.contains("noctalia.getConfig"));
+}
+
+#[test]
+fn covers_final_error_and_pattern_branches() {
+    let handler = r#"
+use std::sync::OnceLock;
+static READY: OnceLock<bool> = OnceLock::new();
+fn widget(ctx: &Context) -> Result<Vec<Op>> {
+    let ready = READY.is_completed();
+    let value = ctx.config_str("message");
+    let mapped = value.clone().map_or(1, |text| text.len() as i64);
+    let kept = value.clone().filter(|text| matches!(text.as_str(), "" | "x"));
+    Ok(vec![Op::log(format!("{}{}{}", ready, mapped, kept.unwrap_or_default()))])
+}
+"#;
+    let compiled =
+        compile(&source(handler), &options("widget", EntryKind::Widget))
+            .expect("compiles");
+    assert!(compiled.source.contains("~= nil"));
+
+    for handler in [
+        "fn widget(ctx: &Context) -> Result<Vec<Op>> { while ctx.now_ms > 0 { } Ok(vec![]) }",
+        "fn widget(ctx: &Context) -> Result<Vec<Op>> { let value = ctx.config_str(\"message\").map(|a: i64, b: i64| a + b); let _ = value; Ok(vec![]) }",
+        "fn helper(ctx: &Context) -> String { let _ = ctx; } fn widget(ctx: &Context) -> Result<Vec<Op>> { let v = helper(ctx); Ok(vec![Op::log(v)]) }",
+    ] {
+        let error =
+            compile(&source(handler), &options("widget", EntryKind::Widget))
+                .expect_err("bail");
+        assert!(!error.message.is_empty());
+    }
+}
+
+#[test]
+fn covers_arithmetic_host_reads_and_pattern_edges() {
+    let handler = r#"
+fn widget(ctx: &Context) -> Result<Vec<Op>> {
+    let a = 10 - 3;
+    let b = 10 / 3;
+    let c = 10.0 / 3.0;
+    let d = 10 % 3;
+    let e = 10.0 % 3.0;
+    let now = ctx.host("now_ms").and_then(Value::as_i64).unwrap_or(0);
+    let dark = ctx.host("dark").and_then(Value::as_bool).unwrap_or(false);
+    let outputs = ctx.host("outputs").unwrap_or(json!([]));
+    let focused = ctx.host("focused_output_name").and_then(Value::as_str).unwrap_or("");
+    let key = "message";
+    let from_key = ctx.config.get(key);
+    let pair = match from_key { (first, second) => first, _ => "none" };
+    let closure = |text: &str| { let upper = text.to_uppercase(); upper };
+    let upper = closure("x");
+    Ok(vec![Op::log(format!("{}{}{}{}{}{}{}{}{}{}", a, b, c, d, e, now, dark, outputs, focused, pair.len() + upper.len()))])
+}
+"#;
+    let compiled =
+        compile(&source(handler), &options("widget", EntryKind::Widget))
+            .expect("compiles");
+    assert!(compiled.source.contains("noctalia.nowMs()"));
+}
+
+#[test]
+fn unconditional_handler_emits_every_callback() {
+    let handler = r#"
+fn handler(ctx: &Context) -> Result<Vec<Op>> {
+    let _ = ctx.now_ms;
+    Ok(vec![Op::log("tick")])
+}
+"#;
+    let compiled =
+        compile(&source(handler), &options("handler", EntryKind::Widget))
+            .expect("compiles");
+    for callback in crate::CALLBACKS {
+        let expected = format!("function {}(", callback.function);
+        assert!(
+            compiled.source.contains(&expected),
+            "missing {}",
+            callback.function
+        );
+    }
+    assert!(compiled.events.is_empty());
+    assert!(compiled.source.contains("noctalia.log(\"tick\")"));
+}
+
+#[test]
+fn matches_macro_records_event_callbacks() {
+    let handler = r#"
+fn handler(ctx: &Context) -> Result<Vec<Op>> {
+    if matches!(ctx.event.as_str(), "click") {
+        Ok(vec![Op::log("click")])
+    } else {
+        Ok(Vec::new())
+    }
+}
+"#;
+    let compiled =
+        compile(&source(handler), &options("handler", EntryKind::Widget))
+            .expect("compiles");
+    assert!(compiled.source.contains("function onClick()"));
+    assert_eq!(compiled.events, vec!["click"]);
+}
+
+#[test]
+fn lazy_fallback_closures_stay_inside_the_nil_branch() {
+    let handler = r#"
+fn handler(ctx: &Context) -> Result<Vec<Op>> {
+    let value = ctx.state_value::<String>("value").map_or_else(
+        || "fallback".to_owned(),
+        |text| text,
+    );
+    let _ = ctx.state_value::<String>("other").ok_or_else(|| "missing");
+    Ok(vec![Op::log(value)])
+}
+"#;
+    let compiled =
+        compile(&source(handler), &options("handler", EntryKind::Service))
+            .expect("compiles");
+    assert!(
+        compiled
+            .source
+            .contains("local __t1 = plugin_state[\"value\"]")
+    );
+    assert!(compiled.source.contains("if __t1 == nil then"));
+    assert!(compiled.source.contains("if __t3 == nil then"));
+    assert!(
+        !compiled
+            .source
+            .contains("local __t4 = error(tostring(\"missing\"))")
+    );
+}
+
+#[test]
+fn negated_event_keeps_the_other_callbacks() {
+    let handler = r#"
+fn handler(ctx: &Context) -> Result<Vec<Op>> {
+    if ctx.event != "click" {
+        Ok(vec![Op::log("tick")])
+    } else {
+        Ok(Vec::new())
+    }
+}
+"#;
+    let compiled =
+        compile(&source(handler), &options("handler", EntryKind::Widget))
+            .expect("compiles");
+    assert!(compiled.source.contains("function onClick()"));
+    assert!(compiled.source.contains("function onHover(hovered)"));
+    assert!(compiled.source.contains("function update()"));
+    assert!(compiled.source.contains("noctalia.log(\"tick\")"));
+}
+
+#[test]
+fn unconditional_handler_reads_the_runtime_event() {
+    let handler = r#"
+fn handler(ctx: &Context) -> Result<Vec<Op>> {
+    Ok(vec![Op::log(ctx.event.to_owned())])
+}
+"#;
+    let compiled =
+        compile(&source(handler), &options("handler", EntryKind::Widget))
+            .expect("compiles");
+    assert!(compiled.source.contains("local function body_events("));
+    assert!(compiled.source.contains("noctalia.log(event)"));
+    assert!(
+        compiled
+            .source
+            .contains("function onClick() body_events(\"click\") end")
+    );
+    assert!(compiled.source.contains("function update() body_"));
+}
+
+#[test]
+fn fallback_body_serves_events_without_a_positive_branch() {
+    for condition in ["ctx.event == \"click\"", "ctx.event != \"click\""] {
+        let handler = format!(
+            "fn handler(ctx: &Context) -> Result<Vec<Op>> {{\n    if {condition} {{\n        Ok(vec![Op::log(\"A\")])\n    }} else {{\n        Ok(vec![Op::log(\"B\")])\n    }}\n}}\n"
+        );
+        let compiled =
+            compile(&source(&handler), &options("handler", EntryKind::Widget))
+                .expect("compiles");
+        for callback in crate::CALLBACKS {
+            let expected = format!("function {}(", callback.function);
+            assert!(
+                compiled.source.contains(&expected),
+                "{condition} missing {}",
+                callback.function
+            );
+        }
+        assert!(compiled.source.contains("local function body_events("));
+        assert!(compiled.source.contains("noctalia.log(\"B\")"));
+    }
+}

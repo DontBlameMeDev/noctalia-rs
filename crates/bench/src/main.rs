@@ -1,3 +1,4 @@
+mod generated;
 mod metadata;
 mod plugins;
 mod process;
@@ -215,6 +216,7 @@ struct Report {
     metadata: Metadata,
     results: Vec<Summary>,
     pairs: Vec<Pair>,
+    generated: Vec<generated::GeneratedSource>,
 }
 
 fn main() -> ExitCode {
@@ -473,6 +475,9 @@ fn run() -> Result<()> {
     pairs.push(Pair::new("service_update", service_rust, service_luau));
 
     plugins::run(&options, scratch.path(), &mut results, &mut pairs)?;
+    let generated = generated::run(&options, scratch.path())?;
+    results.extend(generated.results);
+    pairs.extend(generated.pairs);
 
     let mut fixture = Fixture::new(&workspace, scratch.path())?;
     results.push(measure(options.phase("codegen_generate", true), || {
@@ -488,6 +493,7 @@ fn run() -> Result<()> {
         metadata,
         results,
         pairs,
+        generated: generated.sources,
     };
     print_report(&report);
     if let Some(path) = &options.report {
@@ -653,7 +659,12 @@ fn payload(text: &str) -> Value {
 }
 
 fn sample_config() -> Value {
-    json!({ "name": "bench", "count": 3 })
+    json!({
+        "name": "bench",
+        "count": 3,
+        "message": "Hello",
+        "prefix": "bench",
+    })
 }
 
 fn sample_state() -> Value {
@@ -984,9 +995,13 @@ fn print_report(report: &Report) {
         "luau_p95",
         "luau_p99",
         "speedup",
-        "3x"
+        "target"
     );
-    for pair in &report.pairs {
+    for pair in report
+        .pairs
+        .iter()
+        .filter(|pair| !pair.workload.starts_with("generated_"))
+    {
         println!(
             "{:<20} {:>10.3} {:>10.3} {:>10.3} {:>10.3} {:>10.3} {:>10.3} {:>9.2} {:>7}",
             pair.workload,
@@ -997,11 +1012,73 @@ fn print_report(report: &Report) {
             pair.luau.p95_us,
             pair.luau.p99_us,
             pair.speedup_median,
-            if pair.speedup_median >= 3.0 {
-                "yes"
-            } else {
-                "no"
-            }
+            target(pair),
         );
+    }
+    if !report.generated.is_empty() {
+        println!();
+        println!(
+            "Generated Luau: compiled from the Rust handler vs hand-written"
+        );
+        println!(
+            "{:<24} {:>10} {:>10} {:>10} {:>10} {:>9} {:>14} {:>17}",
+            "workload",
+            "compiled",
+            "compiled95",
+            "hand",
+            "hand95",
+            "speedup",
+            "compiled_bytes",
+            "handwritten_bytes"
+        );
+        for item in &report.generated {
+            let (compiled, compiled95, hand, hand95, speedup) =
+                generated_times(&report.pairs, item.workload);
+            println!(
+                "{:<24} {:>10.3} {:>10.3} {:>10.3} {:>10.3} {:>8.2}x {:>14} {:>17}",
+                item.workload,
+                compiled,
+                compiled95,
+                hand,
+                hand95,
+                speedup,
+                item.compiled_bytes,
+                item.handwritten_bytes
+            );
+        }
+        println!(
+            "compiled/hand are medians in microseconds; speedup = hand / compiled. Target: compiled Luau >= hand-written Luau (parity). Both sides pay the same ~2 us dispatch floor, so the 3x target applies to spool_dispatch, not to this comparison."
+        );
+    }
+}
+
+fn generated_times(
+    pairs: &[Pair],
+    workload: &str,
+) -> (f64, f64, f64, f64, f64) {
+    let Some(pair) = pairs.iter().find(|pair| pair.workload == workload) else {
+        return (0.0, 0.0, 0.0, 0.0, 0.0);
+    };
+    (
+        pair.rust.median_us,
+        pair.rust.p95_us,
+        pair.luau.median_us,
+        pair.luau.p95_us,
+        pair.speedup_median,
+    )
+}
+
+fn target(pair: &Pair) -> &'static str {
+    if pair.workload.starts_with("generated_") {
+        return if pair.speedup_median >= 1.0 {
+            "parity"
+        } else {
+            "slower"
+        };
+    }
+    if pair.speedup_median >= 3.0 {
+        "3x yes"
+    } else {
+        "3x no"
     }
 }
