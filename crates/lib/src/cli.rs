@@ -9,7 +9,7 @@ use std::sync::mpsc::{self, Receiver, RecvTimeoutError};
 use std::thread;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use notify::event::{EventKind, ModifyKind};
+use notify::event::EventKind;
 use notify::{RecursiveMode, Watcher};
 use serde::Deserialize;
 use serde_json::{Value, json};
@@ -172,22 +172,12 @@ fn watch_spool(
     let (sender, receiver) = mpsc::channel();
     let mut watcher = notify::recommended_watcher(
         move |event: notify::Result<notify::Event>| {
-            // Reading the spool directory emits access events. Ignore them
-            // so the helper does not wake itself up.
+            // Reading the spool directory emits access events. Ignore those
+            // so the helper does not wake itself up; everything else wakes it,
+            // including the rescan notify emits when it loses events.
             let relevant = matches!(
                 event,
-                Ok(change)
-                    if matches!(
-                        change.kind,
-                        EventKind::Any
-                            | EventKind::Create(_)
-                            | EventKind::Modify(
-                                ModifyKind::Any
-                                    | ModifyKind::Data(_)
-                                    | ModifyKind::Name(_)
-                            )
-                            | EventKind::Remove(_)
-                    )
+                Ok(change) if !matches!(change.kind, EventKind::Access(_))
             );
             if relevant {
                 let _ = sender.send(());
@@ -324,6 +314,7 @@ mod tests {
     use super::*;
     use crate::{Meta, Op};
     use std::process;
+    use std::time::Instant;
 
     fn plugin() -> Plugin {
         fn handler(ctx: &Context) -> crate::Result<Vec<Op>> {
@@ -570,9 +561,12 @@ mod tests {
         let body = request(&boot, "wake").to_string();
         let writer = thread::spawn(move || {
             thread::sleep(Duration::from_millis(100));
-            fs::write(path, body).expect("request");
+            let temporary = path.with_extension("tmp");
+            fs::write(&temporary, body).expect("request");
+            fs::rename(temporary, path).expect("publish");
         });
         let plugin = plugin();
+        let start = Instant::now();
         let capture = Capture {
             plugin: &plugin,
             data: &spool.data,
@@ -582,9 +576,17 @@ mod tests {
             stop_after: 2,
         }
         .run();
+        let elapsed = start.elapsed();
         writer.join().expect("writer");
 
-        assert!(capture.lines().iter().any(|line| line.contains("wake")));
+        let lines = capture.lines();
+        assert!(lines.iter().any(|line| line.contains("wake")));
+        // The safety net only answers after IDLE_WAIT, so a quick answer
+        // means the watcher woke the loop.
+        assert!(
+            elapsed < Duration::from_millis(750),
+            "the safety net answered after {elapsed:?}"
+        );
 
         spool.cleanup();
     }
