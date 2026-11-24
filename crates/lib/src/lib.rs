@@ -26,6 +26,7 @@ pub use manifest::{
     NumberConfig, Plugin, Setting, SettingKind,
 };
 pub use rng::LuauRng;
+pub use ui::{NodeProps, Props};
 
 pub use noctalia_rs_macros::entry;
 pub use ops::Op;

@@ -22,6 +22,8 @@ a plugin computes.
 - Entry metadata for panels, launchers, widgets, and layers
 - Assets and extra translation files emitted into the plugin directory
 - Typed ops for common host calls and a generic `HostCall` escape hatch
+- Typed UI props (`Props`) that keep keys and static values borrowed instead of
+  building a `serde_json` map per node
 - Host reads through `Context`
 
 ## Cargo setup
