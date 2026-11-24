@@ -25,6 +25,7 @@ a plugin computes.
 - Typed UI props (`Props`) that keep keys and static values borrowed instead of
   building a `serde_json` map per node
 - Host reads through `Context`
+- Event-driven spool dispatch, so idle helpers sleep instead of polling
 
 ## Cargo setup
 

@@ -13,6 +13,7 @@ categories           = ["development-tools"]
 [dependencies]
 chrono.workspace          = true
 noctalia-rs-macros.workspace = true
+notify.workspace          = true
 serde.workspace           = true
 serde_json.workspace      = true
 smallvec                  = "1.16"
