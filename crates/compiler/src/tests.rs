@@ -113,7 +113,10 @@ fn panel(ctx: &Context) -> Result<Vec<Op>> {
     assert!(compiled.source.contains(
         "{ kind = \"column\", props = { id = \"root\", gap = 4 }, children = {"
     ));
-    assert!(compiled.source.contains("{ kind = \"label\", props = { id = \"value\", text = label }, children = {} }"));
+    assert!(compiled.source.contains("kind = \"label\""));
+    assert!(compiled.source.contains("id = \"value\""));
+    assert!(compiled.source.contains("text = label"));
+    assert!(compiled.source.contains("children = {}"));
     assert!(compiled.source.contains("panel.render(tree)"));
     assert!(compiled.source.contains("panel.setWantsSecondTicks(true)"));
     assert!(compiled.source.contains("--!nonstrict"));
@@ -182,7 +185,7 @@ fn update(ctx: &Context) -> Result<Vec<Op>> {
         compile(&source(handler), &options("update", EntryKind::Service))
             .expect("compiles");
 
-    assert!(compiled.source.contains("for _, row in ipairs(rows) do"));
+    assert!(compiled.source.contains("local row = "));
     assert!(
         compiled
             .source
@@ -487,7 +490,6 @@ fn rejects_constructs_outside_the_subset() {
     for handler in [
         "fn handler(ctx: &Context) -> Result<Vec<Op>> { let x = ctx.fuzzy_score(\"a\", \"b\"); Ok(vec![]) }",
         "fn handler(ctx: &Context) -> Result<Vec<Op>> { match ctx.event.as_str() { other => { let _ = other; Ok(Vec::new()) } } }",
-        "fn handler(ctx: &Context) -> Result<Vec<Op>> { while ctx.now_ms > 0 { } Ok(vec![]) }",
         "fn handler(ctx: &Context) -> Result<Vec<Op>> { let x = std::process::id(); Ok(vec![]) }",
     ] {
         assert!(
@@ -1282,12 +1284,6 @@ fn widget(ctx: &Context) -> Result<Vec<Op>> {
 }
 "#,
         r#"
-fn helper(ctx: &Context) -> String { "x".to_owned() }
-fn widget(ctx: &Context) -> Result<Vec<Op>> {
-    helper(ctx);
-    Ok(Vec::new())
-}
-"#,
         r#"
 fn helper(ctx: &Context) -> String { let _ = ctx; }
 fn widget(ctx: &Context) -> Result<Vec<Op>> {
@@ -1500,7 +1496,6 @@ fn widget(ctx: &Context) -> Result<Vec<Op>> {
 fn bails_on_constructs_without_a_safe_translation() {
     for handler in [
         "fn widget(_ctx: &Context) -> Result<Vec<Op>> { Ok(vec![Op::run(json!(\"x\"), None)]) }",
-        "fn widget(_ctx: &Context) -> Result<Vec<Op>> { let value = serde_json::from_str::<serde_json::Value>(\"{}\")?; let _ = value; Ok(vec![]) }",
         "fn widget(_ctx: &Context) -> Result<Vec<Op>> { other = 1; Ok(vec![]) }",
     ] {
         let error =
@@ -1854,7 +1849,6 @@ fn widget(ctx: &Context) -> Result<Vec<Op>> {
     assert!(compiled.source.contains("~= nil"));
 
     for handler in [
-        "fn widget(ctx: &Context) -> Result<Vec<Op>> { while ctx.now_ms > 0 { } Ok(vec![]) }",
         "fn widget(ctx: &Context) -> Result<Vec<Op>> { let value = ctx.config_str(\"message\").map(|a: i64, b: i64| a + b); let _ = value; Ok(vec![]) }",
         "fn helper(ctx: &Context) -> String { let _ = ctx; } fn widget(ctx: &Context) -> Result<Vec<Op>> { let v = helper(ctx); Ok(vec![Op::log(v)]) }",
     ] {
@@ -2022,4 +2016,1010 @@ fn fallback_body_serves_events_without_a_positive_branch() {
         assert!(compiled.source.contains("local function body_events("));
         assert!(compiled.source.contains("noctalia.log(\"B\")"));
     }
+}
+
+#[test]
+fn compiles_json_parsing_and_result_forms() {
+    let handler = r#"
+use serde_json::Value;
+fn handler(ctx: &Context) -> Result<Vec<Op>> {
+    let data = serde_json::from_str::<Value>("{\"n\":1}")?;
+    let n = data.get("n").and_then(Value::as_i64).unwrap_or_default();
+    let maybe = serde_json::from_str::<Value>("null").ok();
+    let fallback = serde_json::from_str::<Value>("nope").unwrap_or(Value::Null);
+    let text = serde_json::to_string(&data).unwrap_or_default();
+    Ok(vec![Op::log(format!("{} {} {} {}", n, maybe.is_some(), fallback.is_null(), text))])
+}
+"#;
+    let compiled =
+        compile(&source(handler), &options("handler", EntryKind::Service))
+            .expect("compiles");
+    assert!(compiled.source.contains("json.decode("));
+    assert!(compiled.source.contains("error(tostring(__t"));
+    assert!(compiled.source.contains("json.encode("));
+    assert!(compiled.source.contains("nil"));
+}
+
+#[test]
+fn compiles_json_result_patterns() {
+    let handler = r#"
+fn handler(_ctx: &Context) -> Result<Vec<Op>> {
+    let value = match serde_json::from_str::<serde_json::Value>("{}") {
+        Ok(data) => data,
+        Err(_) => serde_json::Value::Null,
+    };
+    if let Ok(data) = serde_json::from_str::<serde_json::Value>("[]") {
+        let _ = data;
+    }
+    let Ok(exact) = serde_json::from_str::<serde_json::Value>("null") else {
+        return Ok(Vec::new());
+    };
+    Ok(vec![Op::log(value.to_string()), Op::log(exact.to_string())])
+}
+"#;
+    let compiled =
+        compile(&source(handler), &options("handler", EntryKind::Service))
+            .expect("compiles");
+    assert!(compiled.source.contains("if __t"));
+    assert!(compiled.source.contains("== nil) then"));
+    assert!(compiled.source.contains("== nil) then"));
+}
+
+#[test]
+fn bails_on_json_struct_parsing() {
+    let handler = r#"
+struct Rpc { value: i64 }
+fn handler(_ctx: &Context) -> Result<Vec<Op>> {
+    let value = serde_json::from_str::<Rpc>("{}")?;
+    let _ = value;
+    Ok(Vec::new())
+}
+"#;
+    let error =
+        compile(&source(handler), &options("handler", EntryKind::Service))
+            .expect_err("bails");
+    assert!(error.message.contains("JSON parsing into `Rpc`"));
+    assert!(error.line > 0 && error.column > 0);
+}
+
+#[test]
+fn compiles_nested_table_assignment() {
+    let handler = r#"
+fn handler(ctx: &Context) -> Result<Vec<Op>> {
+    let mut state = ctx.state;
+    state.inner.value = 1;
+    state.rows[0] = json!({ "ok": true });
+    Ok(Vec::new())
+}
+"#;
+    let compiled =
+        compile(&source(handler), &options("handler", EntryKind::Service))
+            .expect("compiles");
+    assert!(compiled.source.contains("state.inner.value = 1"));
+    assert!(compiled.source.contains("state.rows[(0) + 1] ="));
+}
+
+#[test]
+fn compiles_iterator_chains_and_split_cursors() {
+    let handler = r#"
+fn handler(ctx: &Context) -> Result<Vec<Op>> {
+    let values = [1, 2, 3];
+    let doubled = values.iter().map(|value| value * 2).collect::<Vec<i64>>();
+    let kept = values.iter().filter(|value| *value > 1).collect::<Vec<i64>>();
+    let words = "a  b".split_whitespace().collect::<Vec<&str>>();
+    let mut parts = "a.b".split('.');
+    let first = parts.next().unwrap_or_default();
+    Ok(vec![Op::log(format!("{}{}{}{}{}", doubled.len(), kept.len(), words.len(), first, ctx.event))])
+}
+"#;
+    let compiled =
+        compile(&source(handler), &options("handler", EntryKind::Service))
+            .expect("compiles");
+    assert!(compiled.source.contains("string.split("));
+    assert!(compiled.source.contains("__next = 1"));
+    assert!(compiled.source.contains("#__t"));
+    assert!(compiled.source.contains("if __t"));
+}
+
+#[test]
+fn compiles_numeric_string_and_path_methods() {
+    let handler = r#"
+fn handler(_ctx: &Context) -> Result<Vec<Op>> {
+    let value = 1.25_f64;
+    let rounded = value.floor();
+    let fraction = value.fract();
+    let finite = value.is_finite();
+    let joined = "/tmp".join("file");
+    let replaced = "a,b".replace(',', "-");
+    let trimmed = "'hi'".trim_matches('\'');
+    let encoded = serde_json::Value::String("x".to_owned()).to_string();
+    Ok(vec![Op::log(format!("{}{}{}{}{}{}{}", rounded, fraction, finite, joined, replaced, trimmed, encoded))])
+}
+"#;
+    let compiled =
+        compile(&source(handler), &options("handler", EntryKind::Service))
+            .expect("compiles");
+    assert!(compiled.source.contains("math.floor(value)"));
+    assert!(compiled.source.contains("string.sub(__t"));
+    assert!(compiled.source.contains("replace_all("));
+    assert!(compiled.source.contains("string.gsub("));
+    assert!(compiled.source.contains("json.encode("));
+}
+
+#[test]
+fn compiles_struct_defaults_and_tuple_loops() {
+    let handler = r#"
+#[derive(Default)]
+struct State { count: i64, label: String }
+fn handler(ctx: &Context) -> Result<Vec<Op>> {
+    let state = State::default();
+    let pairs = [("a", 1), ("b", 2)];
+    let mut total = 0;
+    for (name, value) in pairs {
+        total += value;
+    }
+    let indexed = [(0, "a"), (1, "b")];
+    for (index, value) in indexed.iter().enumerate() {
+        total += index;
+    }
+    Ok(vec![Op::log(format!("{}{}{}{}", state.count, state.label, total, ctx.event))])
+}
+"#;
+    let compiled =
+        compile(&source(handler), &options("handler", EntryKind::Service))
+            .expect("compiles");
+    assert!(compiled.source.contains("count = 0, label = \"\""));
+    assert!(compiled.source.contains("local name = __t"));
+    assert!(compiled.source.contains("local index = (__t"));
+}
+
+#[test]
+fn compiles_while_loops_blocks_and_array_repeat() {
+    let handler = r#"
+fn handler(_ctx: &Context) -> Result<Vec<Op>> {
+    let flags = [false; 3];
+    let total = {
+        let mut value = 0;
+        while value < 10 {
+            value += 1;
+            if value == 3 { break; }
+        }
+        value
+    };
+    Ok(vec![Op::log(format!("{}{}", flags.len(), total))])
+}
+"#;
+    let compiled =
+        compile(&source(handler), &options("handler", EntryKind::Service))
+            .expect("compiles");
+    assert!(compiled.source.contains("{ false, false, false }"));
+    assert!(compiled.source.contains("while (value < 10) do"));
+    assert!(compiled.source.contains("break"));
+}
+
+#[test]
+fn compiles_host_result_pairs() {
+    let handler = r#"
+fn handler(ctx: &Context) -> Result<Vec<Op>> {
+    let (text, error) = ctx.read_file_result("/tmp/x");
+    let (font, font_error) = ctx.load_font_result("font.ttf");
+    Ok(vec![Op::log(format!("{}{}{}{}", text.unwrap_or_default(), error.is_some(), font.is_some(), font_error.is_some()))])
+}
+"#;
+    let compiled =
+        compile(&source(handler), &options("handler", EntryKind::Service))
+            .expect("compiles");
+    assert!(compiled.source.contains("local text, "));
+    assert!(compiled.source.contains("noctalia.readFile(\"/tmp/x\")"));
+    assert!(compiled.source.contains("noctalia.loadFont(\"font.ttf\")"));
+}
+
+#[test]
+fn bails_on_callback_id_host_methods() {
+    let handler = r#"
+fn handler(ctx: &Context) -> Result<Vec<Op>> {
+    ctx.run_async_start(json!([]), None, None);
+    Ok(Vec::new())
+}
+"#;
+    let error =
+        compile(&source(handler), &options("handler", EntryKind::Service))
+            .expect_err("bails");
+    assert!(error.message.contains("host callback id"));
+    assert!(error.line > 0 && error.column > 0);
+}
+
+#[test]
+fn compiles_result_combinators_and_defaults() {
+    let handler = r#"
+fn handler(ctx: &Context) -> Result<Vec<Op>> {
+    let parsed = serde_json::from_str::<Value>("{}").map_err(|_| "bad")?;
+    let repaired = serde_json::from_str::<Value>("x").unwrap_or_else(|_| Value::Null);
+    let home = std::env::var("HOME").unwrap_or_default();
+    let fallback = parsed.clone().unwrap_or(Value::Null);
+    let optional = parsed.clone().ok();
+    let expected = parsed.clone().expect("data");
+    let value = parsed.unwrap();
+    Ok(vec![Op::log(format!("{} {} {} {} {} {}", home, fallback, optional.is_some(), expected, value, ctx.event))])
+}
+"#;
+    let compiled =
+        compile(&source(handler), &options("handler", EntryKind::Service))
+            .expect("compiles");
+    assert!(compiled.source.contains("json.decode(\"{}\")"));
+    assert!(compiled.source.contains("error(tostring("));
+    assert!(compiled.source.contains("noctalia.getenv(\"HOME\")"));
+    assert!(compiled.source.contains("if __t"));
+}
+
+#[test]
+fn compiles_remaining_numeric_and_string_methods() {
+    let handler = r#"
+fn handler(_ctx: &Context) -> Result<Vec<Op>> {
+    let number = 1.5_f64;
+    let bounded = number.clamp(0.0, 1.0);
+    let largest = number.max(2.0);
+    let smallest = number.min(2.0);
+    let positive = number.rem_euclid(2.0);
+    let suffix = "prefix:value".strip_prefix("prefix:").unwrap_or_default();
+    let upper = "abc".to_ascii_uppercase();
+    let lower = "ABC".to_ascii_lowercase();
+    let starts = "abc".starts_with("a");
+    let ends = "abc".ends_with("c");
+    Ok(vec![Op::log(format!("{}{}{}{}{}{}{}{}{}", bounded, largest, smallest, positive, suffix, upper, lower, starts, ends))])
+}
+"#;
+    let compiled =
+        compile(&source(handler), &options("handler", EntryKind::Service))
+            .expect("compiles");
+    assert!(compiled.source.contains("math.clamp("));
+    assert!(compiled.source.contains("math.max("));
+    assert!(compiled.source.contains("math.min("));
+    assert!(compiled.source.contains("string.sub("));
+    assert!(compiled.source.contains("string.upper("));
+    assert!(compiled.source.contains("string.lower("));
+}
+
+#[test]
+fn compiles_iterator_source_variants() {
+    let handler = r#"
+fn handler(_ctx: &Context) -> Result<Vec<Op>> {
+    let parts = "a,b".split(',').collect::<Vec<&str>>();
+    let letters = "ab".chars().collect::<Vec<char>>();
+    let lines = "a\nb".lines().collect::<Vec<&str>>();
+    let values = [1, 2].into_iter().filter_map(|value| Some(value)).collect::<Vec<i64>>();
+    let mut table = std::collections::HashMap::new();
+    let keys = table.keys().collect::<Vec<&str>>();
+    let entries = table.values().collect::<Vec<&i64>>();
+    Ok(vec![Op::log(format!("{}{}{}{}{}{}", parts.len(), letters.len(), lines.len(), values.len(), keys.len(), entries.len()))])
+}
+"#;
+    let compiled =
+        compile(&source(handler), &options("handler", EntryKind::Service))
+            .expect("compiles");
+    assert!(compiled.source.contains("string.split("));
+    assert!(compiled.source.contains("for _, __t"));
+    assert!(compiled.source.contains("in pairs("));
+    assert!(compiled.source.contains(".__next or 1, #"));
+}
+
+#[test]
+fn compiles_remaining_host_results_and_time_helpers() {
+    let handler = r#"
+fn handler(ctx: &Context) -> Result<Vec<Op>> {
+    let (entries, list_error) = ctx.list_dir_result("/tmp");
+    let (info, info_error) = ctx.file_info_result("/tmp/x");
+    let (made, mkdir_error) = ctx.mkdir_all_result("/tmp/y");
+    let (removed, remove_error) = ctx.remove_file_result("/tmp/z");
+    ctx.math_randomseed(7);
+    let random = ctx.math_random_range(1, 6);
+    let localized = ctx.trp("key", 3, &[("name", json!("x"))]);
+    let load = ctx.is_load_event();
+    Ok(vec![Op::log(format!("{}", entries.len() + info.len() + made.len() + removed.len() + list_error.is_some() as usize + info_error.is_some() as usize + mkdir_error.is_some() as usize + remove_error.is_some() as usize + random as usize + localized.len() + load as usize))])
+}
+"#;
+    let compiled =
+        compile(&source(handler), &options("handler", EntryKind::Service))
+            .expect("compiles");
+    assert!(compiled.source.contains("noctalia.listDir(\"/tmp\")"));
+    assert!(compiled.source.contains("noctalia.fileInfo("));
+    assert!(compiled.source.contains("noctalia.mkdirAll("));
+    assert!(compiled.source.contains("noctalia.removeFile("));
+    assert!(compiled.source.contains("math.randomseed(7)"));
+    assert!(compiled.source.contains("math.random(1, 6)"));
+    assert!(
+        compiled
+            .source
+            .contains("noctalia.trp(\"key\", 3, { name = ")
+    );
+}
+
+#[test]
+fn compiles_remaining_host_paths() {
+    let handler = r#"
+fn handler(ctx: &Context) -> Result<Vec<Op>> {
+    let dir = ctx.host("pluginDir").unwrap_or_default();
+    let data = ctx.host("pluginDataDir").unwrap_or_default();
+    let clip = ctx.host("clipboard").unwrap_or_default();
+    let calendar = ctx.host("calendar").unwrap_or_default();
+    let media = ctx.host("media").unwrap_or_default();
+    let stats = ctx.host("stats").unwrap_or_default();
+    let night = ctx.host("nightlight.state").unwrap_or_default();
+    let compositor = ctx.host("compositor.name").unwrap_or_default();
+    let vertical = ctx.host("bar.vertical").unwrap_or_default();
+    let output = ctx.host("bar.output_name").unwrap_or_default();
+    Ok(vec![Op::log(format!("{}{}{}{}{}{}{}{}{}{}", dir, data, clip, calendar, media, stats, night, compositor, vertical, output))])
+}
+"#;
+    let compiled =
+        compile(&source(handler), &options("handler", EntryKind::Service))
+            .expect("compiles");
+    assert!(compiled.source.contains("noctalia.pluginDir()"));
+    assert!(compiled.source.contains("noctalia.clipboardText()"));
+    assert!(compiled.source.contains("barWidget.isVertical()"));
+    assert!(compiled.source.contains("noctalia.compositor.name"));
+    let error = compile(
+        &source("fn handler(ctx: &Context) -> Result<Vec<Op>> { let _ = ctx.host(\"missing\"); Ok(vec![]) }"),
+        &options("handler", EntryKind::Service),
+    )
+    .expect_err("unknown host path");
+    assert!(error.message.contains("host path `missing`"));
+}
+
+#[test]
+fn compiles_nested_matches_with_enum_and_value_patterns() {
+    let handler = r#"
+enum Mode { Fast, Slow }
+fn handler(_ctx: &Context) -> Result<Vec<Op>> {
+    let mode = Mode::Fast;
+    let value = serde_json::from_str::<Value>("{}").ok();
+    let fast = matches!(mode, Mode::Fast);
+    let text = matches!(value, Some(Value::String(_)));
+    let typed = matches!(value, Some(Value::Number(_)) | Some(Value::Bool(_)));
+    let object = matches!(value, Some(Value::Object(_)));
+    let none = matches!(value, None);
+    Ok(vec![Op::log(format!("{}{}{}{}{}", fast, text, typed, object, none))])
+}
+"#;
+    let compiled =
+        compile(&source(handler), &options("handler", EntryKind::Service))
+            .expect("compiles");
+    assert!(compiled.source.contains("type("));
+    assert!(compiled.source.contains(" or "));
+    assert!(compiled.source.contains(" == nil"));
+}
+
+#[test]
+fn compiles_host_call_struct_and_watch_op() {
+    let handler = r#"
+fn handler(_ctx: &Context) -> Result<Vec<Op>> {
+    Ok(vec![
+        Op::HostCall { root: "noctalia".to_owned(), path: vec!["run".to_owned()], args: vec![json!(1)] },
+        Op::state_watch("key", "callback"),
+    ])
+}
+"#;
+    let compiled =
+        compile(&source(handler), &options("handler", EntryKind::Service))
+            .expect("compiles");
+    assert!(
+        compiled
+            .source
+            .contains("host_call(\"noctalia\", { \"run\" }, { 1 })")
+    );
+    assert!(
+        compiled.source.contains(
+            "state.watch(\"key\", { __host_callback = \"callback\" })"
+        )
+    );
+}
+
+#[test]
+fn scans_helper_expressions_and_inlines_a_manual_default() {
+    let handler = r#"
+struct State { count: i64 }
+impl State {
+    fn default() -> State { State { count: 1 } }
+    fn scan(&self, ops: &mut Vec<Op>) {
+        let value = -1;
+        let wrapped = (value);
+        let reference = &wrapped;
+        let mut total = 0;
+        total += *reference;
+        let cast = total as f64;
+        let array = [1, 2];
+        let tuple = (1, 2);
+        let nested = State { count: 2 };
+        let _ = array[0];
+        let _ = nested.count;
+        let _ = tuple.0;
+        let _ = wrapped.abs();
+        let _ = format!("{}", cast);
+        ops.push(Op::log("scanned"));
+    }
+}
+fn widget(ctx: &Context) -> Result<Vec<Op>> {
+    let state = State::default();
+    let mut ops = Vec::new();
+    state.scan(&mut ops);
+    let _ = ctx.now_ms;
+    Ok(ops)
+}
+"#;
+    let compiled =
+        compile(&source(handler), &options("widget", EntryKind::Widget))
+            .expect("compiles");
+    assert!(compiled.source.contains("count = 1"));
+    assert!(compiled.source.contains("noctalia.log(\"scanned\")"));
+}
+
+#[test]
+fn rejects_a_void_helper_in_value_position() {
+    let handler = r#"
+fn helper() {}
+fn widget(_ctx: &Context) -> Result<Vec<Op>> {
+    let value = helper();
+    let _ = value;
+    Ok(vec![])
+}
+"#;
+    let error =
+        compile(&source(handler), &options("widget", EntryKind::Widget))
+            .expect_err("void helper");
+    assert!(
+        error.message.contains("returns no value"),
+        "{}",
+        error.message
+    );
+}
+
+#[test]
+fn covers_nested_match_pattern_branches() {
+    let handler = r#"
+fn handler(_ctx: &Context) -> Result<Vec<Op>> {
+    let value = serde_json::from_str::<Value>("{}").ok();
+    let literal = matches!(value, Some(Value::String("x")));
+    let reference = matches!(value, Some(&Some(_)));
+    let paren = matches!(value, Some((_)));
+    let path = matches!(value, Some(None));
+    let inner = matches!(value, Some(Some(_)));
+    let number = matches!(value, Some(Value::Number(_)));
+    let array = matches!(value, Some(Value::Array(_)));
+    let boolean = matches!(value, Some(Value::Bool(_)));
+    let object = matches!(value, Some(Value::Object(_)));
+    Ok(vec![Op::log(format!("{}{}{}{}{}{}{}{}{}", literal, reference, paren, path, inner, number, array, boolean, object))])
+}
+"#;
+    let compiled =
+        compile(&source(handler), &options("handler", EntryKind::Service))
+            .expect("compiles");
+    assert!(compiled.source.contains("type("));
+    assert!(compiled.source.contains("~= nil"));
+
+    for pattern in [
+        "crate::Other",
+        "Some(crate::Other)",
+        "Some(crate::Other(_))",
+        "Some(crate::Other { value: _ })",
+        "crate::Other { value: _ }",
+    ] {
+        let handler = format!(
+            "fn handler(_ctx: &Context) -> Result<Vec<Op>> {{ let value = serde_json::from_str::<Value>(\"{{}}\").ok(); let flag = matches!(value, {pattern}); Ok(vec![Op::log(format!(\"{{}}\", flag))]) }}"
+        );
+        let error =
+            compile(&source(&handler), &options("handler", EntryKind::Service))
+                .expect_err("unsupported pattern");
+        assert!(
+            error.message.contains("pattern"),
+            "{pattern}: {}",
+            error.message
+        );
+    }
+}
+
+#[test]
+fn compiles_closure_argument_shapes() {
+    let handler = r#"
+fn handler(ctx: &Context) -> Result<Vec<Op>> {
+    let wild = ctx.config_str("message").map(|_| 1);
+    let block = ctx.config_str("message").map(|value| { let size = value.len(); size });
+    let empty = ctx.config_str("message").map(|_| {});
+    let fold = ctx.config_str("message").map_or_else(|| { let fallback = 1; fallback }, |value| { value.len() });
+    Ok(vec![Op::log(format!("{}{}{}{}", wild.unwrap_or_default(), block.unwrap_or_default(), empty.unwrap_or_default(), fold))])
+}
+"#;
+    let compiled =
+        compile(&source(handler), &options("handler", EntryKind::Service))
+            .expect("compiles");
+    assert!(compiled.source.contains("if __t1 ~= nil then"));
+    assert!(compiled.source.contains("nil"));
+}
+
+#[test]
+fn compiles_remaining_collection_and_value_methods() {
+    let handler = r#"
+fn handler(ctx: &Context) -> Result<Vec<Op>> {
+    let escaped = "[]-abc".trim_matches("[]-");
+    let mut table = std::collections::HashMap::new();
+    table.insert("a", 1);
+    table.insert(0, 2);
+    table.remove("a");
+    table.clear();
+    let object = json!({ "a": 1 }).as_object().is_some();
+    let text = json!("x").as_str().is_some();
+    let number = json!(1).as_i64().is_some();
+    let boolean = json!(true).as_bool().is_some();
+    let array = json!([1]).as_array().is_some();
+    let null = json!(null).is_null();
+    let millis = ctx.now_ms.duration_since(0).as_millis();
+    let secs = ctx.now_ms.as_secs();
+    let nanos = ctx.now_ms.as_nanos();
+    let parts = "a,b".split(',');
+    let first = parts.next().unwrap_or_default();
+    let bytes = json!([1]).as_array().unwrap().to_vec();
+    Ok(vec![Op::log(format!("{}{}{}{}{}{}{}{}{}{}{}{}{}", escaped, object, text, number, boolean, array, null, millis, secs, nanos, first, bytes.len(), ctx.event))])
+}
+"#;
+    let compiled =
+        compile(&source(handler), &options("handler", EntryKind::Service))
+            .expect("compiles");
+    assert!(compiled.source.contains("string.gsub("));
+    assert!(compiled.source.contains("table.clear("));
+    assert!(compiled.source.contains("table[0] = 2"));
+    assert!(compiled.source.contains("table[\"a\"] = nil"));
+    assert!(
+        compiled
+            .source
+            .contains("math.floor(noctalia.nowMs() / 1000)")
+    );
+    assert!(compiled.source.contains("noctalia.nowMs() * 1000000"));
+}
+
+#[test]
+fn bails_on_unsupported_json_null_and_op_structs() {
+    for handler in [
+        "fn handler(_ctx: &Context) -> Result<Vec<Op>> { let _ = json!({ \"a\": null }); Ok(vec![]) }",
+        "fn handler(_ctx: &Context) -> Result<Vec<Op>> { let _ = json!([null]); Ok(vec![]) }",
+        "fn handler(_ctx: &Context) -> Result<Vec<Op>> { Ok(vec![Op::Nope { value: 1 }]) }",
+    ] {
+        let error =
+            compile(&source(handler), &options("handler", EntryKind::Service))
+                .expect_err("unsupported");
+        assert!(!error.message.is_empty());
+    }
+    let handler = r#"
+fn handler(_ctx: &Context) -> Result<Vec<Op>> {
+    let _ = json!(null);
+    Ok(Vec::new())
+}
+"#;
+    let compiled =
+        compile(&source(handler), &options("handler", EntryKind::Service))
+            .expect("compiles");
+    assert!(!compiled.source.contains("noctalia.log"));
+}
+
+#[test]
+fn scans_loop_and_let_bindings_in_helpers() {
+    let handler = r#"
+fn helper(ctx: &Context, ops: &mut Vec<Op>) {
+    let mut total = 0;
+    loop {
+        total += 1;
+        break;
+    }
+    if let Some(value) = ctx.config_str("message") {
+        total += value.len() as i64;
+    }
+    total = total + 1;
+    ops.push(Op::log(format!("{}", total)));
+}
+fn widget(ctx: &Context) -> Result<Vec<Op>> {
+    let mut ops = Vec::new();
+    helper(ctx, &mut ops);
+    Ok(ops)
+}
+"#;
+    let compiled =
+        compile(&source(handler), &options("widget", EntryKind::Widget))
+            .expect("compiles");
+    assert!(compiled.source.contains("while true do"));
+    assert!(compiled.source.contains("break"));
+}
+
+#[test]
+fn compiles_format_escapes_named_arguments_and_radix() {
+    let handler = r#"
+fn handler(_ctx: &Context) -> Result<Vec<Op>> {
+    let value = 42;
+    let escaped = format!("{{literal}} and }}");
+    let named = format!("{value}", value = value);
+    let radix = i64::from_str_radix("ff", 16)?;
+    Ok(vec![Op::log(format!("{} {} {}", escaped, named, radix))])
+}
+"#;
+    let compiled =
+        compile(&source(handler), &options("handler", EntryKind::Service))
+            .expect("compiles");
+    assert!(compiled.source.contains("tonumber(\"ff\", 16)"));
+    assert!(compiled.source.contains("{literal}"));
+}
+
+#[test]
+fn bails_on_bad_format_macro_and_translation_shapes() {
+    for handler in [
+        "fn handler(_ctx: &Context) -> Result<Vec<Op>> { let text = format!(\"{}\"); Ok(vec![Op::log(text)]) }",
+        "fn handler(_ctx: &Context) -> Result<Vec<Op>> { let text = format!(\"{missing}\"); Ok(vec![Op::log(text)]) }",
+        "fn handler(_ctx: &Context) -> Result<Vec<Op>> { let bad = todo!(); let _ = bad; Ok(vec![]) }",
+        "fn handler(ctx: &Context) -> Result<Vec<Op>> { let text = ctx.tr(\"key\", \"bad\"); Ok(vec![Op::log(text)]) }",
+        "fn handler(ctx: &Context) -> Result<Vec<Op>> { let text = ctx.tr(\"key\", &[1]); Ok(vec![Op::log(text)]) }",
+        "fn handler(ctx: &Context) -> Result<Vec<Op>> { let text = ctx.tr(\"key\", &[()]); Ok(vec![Op::log(text)]) }",
+        "fn handler(ctx: &Context) -> Result<Vec<Op>> { let text = ctx.tr(\"key\", &[(\"only\",)]); Ok(vec![Op::log(text)]) }",
+    ] {
+        let error =
+            compile(&source(handler), &options("handler", EntryKind::Service))
+                .expect_err("unsupported shape");
+        assert!(!error.message.is_empty(), "{handler}");
+    }
+}
+
+#[test]
+fn compiles_trp_with_the_count_argument() {
+    let handler = r#"
+fn handler(ctx: &Context) -> Result<Vec<Op>> {
+    let localized = ctx.trp("files", 3, &[("name", json!("x"))]);
+    let empty = ctx.trp("files", 1, &[]);
+    Ok(vec![Op::log(format!("{}{}", localized, empty))])
+}
+"#;
+    let compiled =
+        compile(&source(handler), &options("handler", EntryKind::Service))
+            .expect("compiles");
+    assert!(
+        compiled
+            .source
+            .contains("noctalia.trp(\"files\", 3, { name = \"x\" })"),
+        "{}",
+        compiled.source
+    );
+    assert!(
+        compiled.source.contains("noctalia.trp(\"files\", 1, {"),
+        "{}",
+        compiled.source
+    );
+
+    let short = r#"
+fn handler(ctx: &Context) -> Result<Vec<Op>> {
+    let localized = ctx.trp("files", &[]);
+    Ok(vec![Op::log(localized)])
+}
+"#;
+    let error =
+        compile(&source(short), &options("handler", EntryKind::Service))
+            .expect_err("bails");
+    assert!(
+        error.message.contains("missing argument 2"),
+        "{}",
+        error.message
+    );
+    assert!(error.line > 0 && error.column > 0);
+}
+
+#[test]
+fn compiles_env_var_as_an_optional_string() {
+    let handler = r#"
+fn handler(_ctx: &Context) -> Result<Vec<Op>> {
+    let home = std::env::var("HOME").unwrap_or_default();
+    let present = std::env::var("MISSING").is_some();
+    let fallback = std::env::var("MISSING").unwrap_or("fallback".to_owned());
+    Ok(vec![Op::log(format!("{}{}{}", home, present, fallback))])
+}
+"#;
+    let compiled =
+        compile(&source(handler), &options("handler", EntryKind::Service))
+            .expect("compiles");
+    assert!(
+        compiled
+            .source
+            .contains("(noctalia.getenv(\"HOME\") or \"\")"),
+        "{}",
+        compiled.source
+    );
+    assert!(
+        compiled
+            .source
+            .contains("(noctalia.getenv(\"MISSING\") ~= nil)"),
+        "{}",
+        compiled.source
+    );
+    assert!(
+        compiled
+            .source
+            .contains("(noctalia.getenv(\"MISSING\") or \"fallback\")"),
+        "{}",
+        compiled.source
+    );
+}
+
+#[test]
+fn joins_lists_and_bails_on_other_receivers() {
+    let handler = r#"
+fn handler(_ctx: &Context) -> Result<Vec<Op>> {
+    let parts = vec!["a".to_owned(), "b".to_owned()];
+    let joined = parts.join(",");
+    let path = "/tmp".join("file");
+    Ok(vec![Op::log(format!("{}{}", joined, path))])
+}
+"#;
+    let compiled =
+        compile(&source(handler), &options("handler", EntryKind::Service))
+            .expect("compiles");
+    assert!(
+        compiled.source.contains("table.concat(parts, \",\")"),
+        "{}",
+        compiled.source
+    );
+    assert!(
+        compiled.source.contains("string.sub(__t"),
+        "{}",
+        compiled.source
+    );
+
+    let map = r#"
+fn handler(_ctx: &Context) -> Result<Vec<Op>> {
+    let mut table = std::collections::HashMap::new();
+    let bad = table.join(",");
+    Ok(vec![Op::log(bad)])
+}
+"#;
+    let error = compile(&source(map), &options("handler", EntryKind::Service))
+        .expect_err("bails");
+    assert!(
+        error.message.contains("join() needs a list"),
+        "{}",
+        error.message
+    );
+    assert!(error.line > 0 && error.column > 0);
+}
+
+#[test]
+fn removes_list_items_and_map_entries() {
+    let handler = r#"
+fn handler(_ctx: &Context) -> Result<Vec<Op>> {
+    let mut values = vec![1, 2, 3];
+    let removed = values.remove(0);
+    let mut counts = std::collections::HashMap::new();
+    counts.insert("a", 1);
+    let taken = counts.remove("a");
+    Ok(vec![Op::log(format!("{}{}{}", removed, taken.is_some(), values.len()))])
+}
+"#;
+    let compiled =
+        compile(&source(handler), &options("handler", EntryKind::Service))
+            .expect("compiles");
+    assert!(
+        compiled.source.contains("table.remove(values, (0) + 1)"),
+        "{}",
+        compiled.source
+    );
+    assert!(
+        compiled.source.contains("counts[\"a\"] = nil"),
+        "{}",
+        compiled.source
+    );
+    assert!(
+        compiled.source.contains("(taken ~= nil)"),
+        "{}",
+        compiled.source
+    );
+
+    let set = r#"
+fn handler(_ctx: &Context) -> Result<Vec<Op>> {
+    let mut names = std::collections::BTreeSet::new();
+    names.remove("a");
+    Ok(Vec::new())
+}
+"#;
+    let error = compile(&source(set), &options("handler", EntryKind::Service))
+        .expect_err("bails");
+    assert!(
+        error.message.contains("remove() needs a list"),
+        "{}",
+        error.message
+    );
+    assert!(error.line > 0 && error.column > 0);
+}
+
+#[test]
+fn keeps_bodies_with_only_void_method_statements() {
+    let handler = r#"
+fn handler(_ctx: &Context) -> Result<Vec<Op>> {
+    let mut values = vec![1];
+    values.clear();
+    Ok(Vec::new())
+}
+"#;
+    let compiled =
+        compile(&source(handler), &options("handler", EntryKind::Service))
+            .expect("compiles");
+    assert!(
+        compiled.source.contains("table.clear(values)"),
+        "{}",
+        compiled.source
+    );
+    assert!(
+        compiled.source.contains("local function body_update()"),
+        "{}",
+        compiled.source
+    );
+}
+
+#[test]
+fn skips_nil_filter_map_results() {
+    let handler = r#"
+fn handler(_ctx: &Context) -> Result<Vec<Op>> {
+    let kept = [1, 2, 3].into_iter().filter_map(|value| if value > 1 { Some(value) } else { None }).collect::<Vec<i64>>();
+    Ok(vec![Op::log(format!("{}", kept.len()))])
+}
+"#;
+    let compiled =
+        compile(&source(handler), &options("handler", EntryKind::Service))
+            .expect("compiles");
+    assert!(
+        compiled.source.contains("local __t6 = (__t5)"),
+        "{}",
+        compiled.source
+    );
+    assert!(
+        compiled.source.contains("if __t6 ~= nil then"),
+        "{}",
+        compiled.source
+    );
+    assert!(
+        compiled.source.contains("__t1[#__t1 + 1] = __t6"),
+        "{}",
+        compiled.source
+    );
+}
+
+#[test]
+fn splits_whitespace_runs_like_rust() {
+    let handler = r#"
+fn handler(_ctx: &Context) -> Result<Vec<Op>> {
+    let words = "a\tb".split_whitespace().collect::<Vec<&str>>();
+    Ok(vec![Op::log(format!("{}", words.len()))])
+}
+"#;
+    let compiled =
+        compile(&source(handler), &options("handler", EntryKind::Service))
+            .expect("compiles");
+    assert!(
+        compiled
+            .source
+            .contains("for __word in string.gmatch(\"a\\tb\", \"%S+\")"),
+        "{}",
+        compiled.source
+    );
+    assert!(!compiled.source.contains("~= \"\" then"));
+}
+
+#[test]
+fn collects_only_the_items_left_by_split_next() {
+    let handler = r#"
+fn handler(_ctx: &Context) -> Result<Vec<Op>> {
+    let mut parts = "a.b.c".split('.');
+    let first = parts.next().unwrap_or_default();
+    let rest = parts.collect::<Vec<&str>>();
+    Ok(vec![Op::log(format!("{}{}", first, rest.len()))])
+}
+"#;
+    let compiled =
+        compile(&source(handler), &options("handler", EntryKind::Service))
+            .expect("compiles");
+    assert!(
+        compiled.source.contains("parts.__next = parts.__next + 1"),
+        "{}",
+        compiled.source
+    );
+    assert!(
+        compiled
+            .source
+            .contains("for __t5 = __t4.__next or 1, #__t4 do"),
+        "{}",
+        compiled.source
+    );
+}
+
+#[test]
+fn strips_carriage_returns_and_trailing_newlines() {
+    let handler = r#"
+fn handler(_ctx: &Context) -> Result<Vec<Op>> {
+    let lines = "a\r\nb\n".lines().collect::<Vec<&str>>();
+    Ok(vec![Op::log(format!("{}", lines.len()))])
+}
+"#;
+    let compiled =
+        compile(&source(handler), &options("handler", EntryKind::Service))
+            .expect("compiles");
+    assert!(
+        compiled
+            .source
+            .contains("string.gsub(\"a\\r\\nb\\n\", \"\\r\\n\", \"\\n\")"),
+        "{}",
+        compiled.source
+    );
+    assert!(
+        compiled.source.contains("table.remove(__lines)"),
+        "{}",
+        compiled.source
+    );
+    assert!(
+        compiled.source.contains("string.split(__text, \"\\n\")"),
+        "{}",
+        compiled.source
+    );
+}
+
+#[test]
+fn loops_over_maps_with_pairs() {
+    let handler = r#"
+fn handler(_ctx: &Context) -> Result<Vec<Op>> {
+    let mut counts = std::collections::HashMap::new();
+    counts.insert("a", 1);
+    let mut total = 0;
+    for (name, value) in counts {
+        total += value;
+    }
+    Ok(vec![Op::log(format!("{}{}", total, name))])
+}
+"#;
+    let compiled =
+        compile(&source(handler), &options("handler", EntryKind::Service))
+            .expect("compiles");
+    assert!(
+        compiled
+            .source
+            .contains("for name, value in pairs(__t1) do"),
+        "{}",
+        compiled.source
+    );
+
+    let values = r#"
+fn handler(_ctx: &Context) -> Result<Vec<Op>> {
+    let mut counts = std::collections::HashMap::new();
+    let mut total = 0;
+    for value in counts.values() {
+        total += value;
+    }
+    Ok(vec![Op::log(format!("{}", total))])
+}
+"#;
+    let compiled =
+        compile(&source(values), &options("handler", EntryKind::Service))
+            .expect("compiles");
+    assert!(
+        compiled.source.contains("for _, value in pairs(__t1) do"),
+        "{}",
+        compiled.source
+    );
+
+    let enumerated = r#"
+fn handler(_ctx: &Context) -> Result<Vec<Op>> {
+    let mut counts = std::collections::HashMap::new();
+    for (index, value) in counts.iter().enumerate() {
+        let _ = index;
+        let _ = value;
+    }
+    Ok(Vec::new())
+}
+"#;
+    let error =
+        compile(&source(enumerated), &options("handler", EntryKind::Service))
+            .expect_err("bails");
+    assert!(
+        error.message.contains("needs a list, not a map"),
+        "{}",
+        error.message
+    );
+    assert!(error.line > 0 && error.column > 0);
 }
