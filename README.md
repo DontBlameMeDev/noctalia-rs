@@ -23,6 +23,7 @@ a plugin computes.
 - Assets and extra translation files emitted into the plugin directory
 - Typed ops for common host calls and a generic `HostCall` escape hatch
 - Host reads through `Context`
+- Event-driven spool dispatch, so idle helpers sleep instead of polling
 
 ## Cargo setup
 

@@ -5,9 +5,12 @@ use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 use std::process::{self, ExitCode};
 use std::sync::Arc;
+use std::sync::mpsc::{self, Receiver, RecvTimeoutError};
 use std::thread;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
+use notify::event::{EventKind, ModifyKind};
+use notify::{RecursiveMode, Watcher};
 use serde::Deserialize;
 use serde_json::{Value, json};
 
@@ -17,6 +20,8 @@ use crate::manifest::Plugin;
 use crate::ops::Op;
 
 const POLL_INTERVAL: Duration = Duration::from_millis(1);
+// Catch a request if the watcher misses an event.
+const IDLE_WAIT: Duration = Duration::from_secs(1);
 
 #[derive(Debug, Deserialize)]
 struct Request {
@@ -46,16 +51,8 @@ struct Serve<'a, W: Write> {
 impl<W: Write> Serve<'_, W> {
     fn run(&mut self) -> Result<()> {
         self.emit_ready()?;
-        loop {
-            let processed = self.process_batch()?;
-            Self::pause_if_idle(processed);
-        }
-    }
-
-    fn pause_if_idle(processed: usize) {
-        if processed == 0 {
-            thread::sleep(POLL_INTERVAL);
-        }
+        let watched = watch_spool(self.spool_dir);
+        serve_loop(self, watched.as_ref())
     }
 
     fn emit_ready(&mut self) -> Result<()> {
@@ -146,6 +143,60 @@ impl<W: Write> Serve<'_, W> {
             &json!({ "control": "error", "request": request, "message": message }),
         )
     }
+}
+
+fn serve_loop<W: Write>(
+    server: &mut Serve<'_, W>,
+    watched: Option<&(Receiver<()>, notify::RecommendedWatcher)>,
+) -> Result<()> {
+    loop {
+        while server.process_batch()? > 0 {}
+        wait_for_work(watched);
+    }
+}
+
+fn wait_for_work(watched: Option<&(Receiver<()>, notify::RecommendedWatcher)>) {
+    let Some((receiver, _watcher)) = watched else {
+        thread::sleep(POLL_INTERVAL);
+        return;
+    };
+    match receiver.recv_timeout(IDLE_WAIT) {
+        Ok(()) | Err(RecvTimeoutError::Timeout) => {}
+        Err(RecvTimeoutError::Disconnected) => thread::sleep(POLL_INTERVAL),
+    }
+}
+
+fn watch_spool(
+    spool_dir: &Path,
+) -> Option<(Receiver<()>, notify::RecommendedWatcher)> {
+    let (sender, receiver) = mpsc::channel();
+    let mut watcher = notify::recommended_watcher(
+        move |event: notify::Result<notify::Event>| {
+            // Reading the spool directory emits access events. Ignore them
+            // so the helper does not wake itself up.
+            let relevant = matches!(
+                event,
+                Ok(change)
+                    if matches!(
+                        change.kind,
+                        EventKind::Any
+                            | EventKind::Create(_)
+                            | EventKind::Modify(
+                                ModifyKind::Any
+                                    | ModifyKind::Data(_)
+                                    | ModifyKind::Name(_)
+                            )
+                            | EventKind::Remove(_)
+                    )
+            );
+            if relevant {
+                let _ = sender.send(());
+            }
+        },
+    )
+    .ok()?;
+    watcher.watch(spool_dir, RecursiveMode::NonRecursive).ok()?;
+    Some((receiver, watcher))
 }
 
 #[must_use = "the exit code must be returned to the caller"]
@@ -507,6 +558,33 @@ mod tests {
         assert!(ops.first().is_some_and(|line| line.contains("first")));
         assert!(ops.get(1).is_some_and(|line| line.contains("second")));
         assert!(ops.get(2).is_some_and(|line| line.contains("third")));
+
+        spool.cleanup();
+    }
+
+    #[test]
+    fn test_serve_wakes_on_new_request() {
+        let spool = TestSpool::new("serve-wake");
+        let boot = "boot-wake".to_owned();
+        let path = spool.spool.join("000000000001.json");
+        let body = request(&boot, "wake").to_string();
+        let writer = thread::spawn(move || {
+            thread::sleep(Duration::from_millis(100));
+            fs::write(path, body).expect("request");
+        });
+        let plugin = plugin();
+        let capture = Capture {
+            plugin: &plugin,
+            data: &spool.data,
+            spool: &spool.spool,
+            boot: &boot,
+            stale: BTreeSet::new(),
+            stop_after: 2,
+        }
+        .run();
+        writer.join().expect("writer");
+
+        assert!(capture.lines().iter().any(|line| line.contains("wake")));
 
         spool.cleanup();
     }
