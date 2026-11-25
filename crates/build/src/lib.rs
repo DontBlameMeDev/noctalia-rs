@@ -67,8 +67,10 @@ struct CompileContext<'a> {
     mode: CompileMode,
     state_key: &'a str,
     strings: &'a [&'a str],
+    plugin_settings: &'a [String],
     constants: &'a mut String,
     warnings: &'a mut Vec<String>,
+    natives: &'a mut std::collections::BTreeMap<String, compiler::NativeFn>,
 }
 
 fn identifier(value: &str) -> String {
@@ -149,7 +151,9 @@ fn generate_with(
     let state_key = state_key(root)?;
     let string_keys = string_settings(root);
     let strings = string_keys.iter().map(String::as_str).collect::<Vec<_>>();
+    let plugin_settings = setting_keys(root.get("setting"));
     let mut constants = String::new();
+    let mut natives = std::collections::BTreeMap::new();
     write_entries(
         &mut generated.body,
         root,
@@ -159,11 +163,24 @@ fn generate_with(
             mode,
             state_key: &state_key,
             strings: &strings,
+            plugin_settings: &plugin_settings,
             constants: &mut constants,
             warnings: &mut warnings,
+            natives: &mut natives,
         },
     )
     .map_err(|error| format!("entries: {error}"))?;
+    let native_file = out_dir.join("native.rs");
+    if natives.is_empty() {
+        if native_file.exists() {
+            fs::remove_file(native_file)?;
+        }
+    } else {
+        write_native(&native_file, &natives)?;
+        generated.prefix.push_str(
+            "include!(concat!(env!(\"OUT_DIR\"), \"/native.rs\"));\n\n",
+        );
+    }
     generated.prefix.push_str(&constants);
     {
         let mut context = FileContext {
@@ -174,7 +191,12 @@ fn generate_with(
         };
         write_files(&mut context).map_err(|error| format!("files: {error}"))?;
     }
-    let _ = write!(generated.body, "    plugin\n}}\n");
+    let plugin = if natives.is_empty() {
+        "    plugin\n}\n"
+    } else {
+        "    plugin.with_native(__noctalia_native::dispatch)\n}\n"
+    };
+    let _ = write!(generated.body, "{plugin}");
     let defaults = default_entry_scripts(root)?;
     if !defaults.is_empty() {
         let _ = writeln!(
@@ -748,6 +770,141 @@ fn write_entries(
     Ok(())
 }
 
+fn local_name(name: &str) -> String {
+    format!("__p_{name}")
+}
+
+fn write_native(
+    path: &Path,
+    natives: &std::collections::BTreeMap<String, compiler::NativeFn>,
+) -> Result<(), BoxError> {
+    let needs_pathbuf = natives.values().any(|item| {
+        item.params.iter().any(|param| {
+            param
+                .owned
+                .as_deref()
+                .is_some_and(|ty| ty.contains("PathBuf"))
+        })
+    });
+    let needs_option_ref = natives.values().any(|item| {
+        item.params
+            .iter()
+            .any(|param| param.pass == compiler::NativePass::AsRef)
+    });
+    let mut out = String::from(concat!(
+        "// Native functions that run in the helper process.\n",
+        "//\n",
+        "// Every parameter type must implement `serde::de::DeserializeOwned` and\n",
+        "// every success type must implement `serde::Serialize`. Error types must\n",
+        "// implement `Display`.\n",
+        "mod __noctalia_native {\n",
+        "    use serde_json::Value;\n",
+    ));
+    if needs_pathbuf {
+        out.push_str("    use std::path::PathBuf;\n");
+    }
+    if needs_option_ref {
+        out.push_str(concat!(
+            "\n",
+            "    fn option_ref<T>(value: &Option<T>) -> Option<&T> {\n",
+            "        value.as_ref()\n",
+            "    }\n",
+        ));
+    }
+    out.push_str(concat!(
+        "\n",
+        "    pub(crate) fn dispatch(\n",
+        "        name: &str,\n",
+        "        __args: Value,\n",
+        "        __noctalia_context: Option<&noctalia_rs::Context>,\n",
+        "    ) -> Result<Value, String> {\n",
+        "        let _ = __noctalia_context;\n",
+        "        match name {\n",
+    ));
+    for item in natives.values() {
+        let mut rust_path = String::from("crate::");
+        if item.module != "main" {
+            rust_path.push_str(&item.module);
+            rust_path.push_str("::");
+        }
+        if let Some(class) = &item.class {
+            rust_path.push_str(class);
+            rust_path.push_str("::");
+        }
+        rust_path.push_str(&item.function);
+        let mut args = Vec::new();
+        let mut needs_context = false;
+        for param in &item.params {
+            if param.kind == compiler::NativeParamKind::Context {
+                needs_context = true;
+                args.push("__handler_context".to_owned());
+                continue;
+            }
+            let local = local_name(&param.name);
+            args.push(match param.pass {
+                compiler::NativePass::Value => local,
+                compiler::NativePass::Ref => format!("&{local}"),
+                compiler::NativePass::Slice => format!("&{local}[..]"),
+                compiler::NativePass::AsRef => format!("option_ref(&{local})"),
+                compiler::NativePass::AsDeref => format!("{local}.as_deref()"),
+            });
+        }
+        let args = args.join(", ");
+        let _ = writeln!(out, "            {} => {{", quote(&item.name));
+        if needs_context {
+            let _ = writeln!(
+                out,
+                "                let __handler_context = __noctalia_context.ok_or(\"native function `{}` needs the handler context\")?;",
+                item.name
+            );
+        }
+        for param in &item.params {
+            if param.kind == compiler::NativeParamKind::Context {
+                continue;
+            }
+            let name = &param.name;
+            let local = local_name(name);
+            let declared = param
+                .owned
+                .as_deref()
+                .map_or_else(String::new, |ty| format!(": {ty} "));
+            let _ = writeln!(
+                out,
+                "                let {local}{declared}= serde_json::from_value(__args.get({}).cloned().unwrap_or(Value::Null)).map_err(|error| format!(\"{}: {{error}}\"))?;",
+                quote(name),
+                name
+            );
+        }
+        if item.result {
+            let _ =
+                writeln!(out, "                match {rust_path}({args}) {{");
+            let _ = writeln!(
+                out,
+                "                    Ok(value) => serde_json::to_value(value).map_err(|error| error.to_string()),"
+            );
+            let _ = writeln!(
+                out,
+                "                    Err(error) => Err(error.to_string()),"
+            );
+            let _ = writeln!(out, "                }}");
+        } else {
+            let _ = writeln!(
+                out,
+                "                serde_json::to_value({rust_path}({args})).map_err(|error| error.to_string())"
+            );
+        }
+        let _ = writeln!(out, "            }}");
+    }
+    out.push_str(concat!(
+        "            _ => Err(format!(\"unknown native function `{name}`\")),\n",
+        "        }\n",
+        "    }\n",
+        "}\n",
+    ));
+    fs::write(path, out)?;
+    Ok(())
+}
+
 fn entry_expression(
     row: &toml::Table,
     kind: &str,
@@ -843,6 +1000,29 @@ fn compiler_kind(kind: &str) -> Result<compiler::EntryKind, BoxError> {
         "layer" => compiler::EntryKind::Layer,
         other => return Err(format!("unsupported entry kind {other}").into()),
     })
+}
+
+/// Setting keys declared for one entry, plugin level plus entry level.
+fn setting_keys(value: Option<&Value>) -> Vec<String> {
+    let mut keys = Vec::new();
+    collect_setting_keys(value, &mut keys);
+    keys
+}
+
+fn collect_setting_keys(value: Option<&Value>, keys: &mut Vec<String>) {
+    let Some(items) = value.and_then(Value::as_array) else {
+        return;
+    };
+    for item in items {
+        let Some(table) = item.as_table() else {
+            continue;
+        };
+        if let Some(key) = table.get("key").and_then(Value::as_str)
+            && !keys.iter().any(|existing| existing == key)
+        {
+            keys.push(key.to_owned());
+        }
+    }
 }
 
 fn string_settings(root: &toml::Table) -> Vec<String> {
@@ -1165,9 +1345,10 @@ fn compile_failure(
     warnings: &mut Vec<String>,
     id: &str,
     rendered: String,
+    fatal: bool,
 ) -> Result<Option<String>, BoxError> {
     let message = format!("entry {id}: {rendered}");
-    if mode == CompileMode::Strict {
+    if fatal || mode == CompileMode::Strict {
         return Err(message.into());
     }
     warnings.push(message);
@@ -1204,7 +1385,13 @@ fn compile_entry(
         let rendered = format!(
             "{file}:1:1: handler `{handler}` not found in crate source"
         );
-        return compile_failure(context.mode, context.warnings, id, rendered);
+        return compile_failure(
+            context.mode,
+            context.warnings,
+            id,
+            rendered,
+            false,
+        );
     };
     let module_sources = site
         .modules
@@ -1225,6 +1412,12 @@ fn compile_entry(
     let source =
         resolve_includes(&site.source, &context.source.join(&site.file))?;
     let display = site.file.to_string_lossy();
+    let mut entry_settings = context.plugin_settings.to_vec();
+    collect_setting_keys(row.get("setting"), &mut entry_settings);
+    let entry_settings = entry_settings
+        .iter()
+        .map(String::as_str)
+        .collect::<Vec<_>>();
     let result = compiler::compile(
         &source,
         &compiler::Options {
@@ -1233,18 +1426,26 @@ fn compile_entry(
             state_key: context.state_key,
             kind: compiler_kind(kind)?,
             strings: context.strings,
+            settings: &entry_settings,
             module: &site.module,
             modules: &owned,
+            native: match context.mode {
+                CompileMode::Strict => compiler::NativeMode::Deny,
+                _ => compiler::NativeMode::Allow,
+            },
         },
     );
     let compiled = match result {
         Ok(compiled) => compiled,
         Err(error) => {
+            let rendered = error.render(&display);
+            let fatal = error.fatal;
             return compile_failure(
                 context.mode,
                 context.warnings,
                 id,
-                error.render(&display),
+                rendered,
+                fatal,
             );
         }
     };
@@ -1256,6 +1457,19 @@ fn compile_entry(
         fs::create_dir_all(parent)?;
     }
     fs::write(target, compiled.source)?;
+
+    for item in compiled.native {
+        let line = format!(
+            "entry {id}: native `{}` (cache {} ms): {}",
+            item.name, item.cache_ms, item.reason
+        );
+        if let std::collections::btree_map::Entry::Vacant(slot) =
+            context.natives.entry(item.name.clone())
+        {
+            slot.insert(item);
+        }
+        context.warnings.push(line);
+    }
 
     let constant = format!("LUAU_{}", identifier(key).to_uppercase());
     let _ = writeln!(
@@ -2023,6 +2237,272 @@ mod tests {
             env_error.contains("NOCTALIA_RS_COMPILE must be"),
             "{env_error}"
         );
+        Ok(())
+    }
+
+    const NATIVE_RESULT_SOURCE: &str = r#"use noctalia_rs::{Context, Op, Result};
+
+fn fetch_prs(limit: usize) -> Result<Vec<String>> {
+    let text = std::fs::read_to_string("/tmp/x")?;
+    Ok(vec![format!("{limit} {text}")])
+}
+
+fn handler(_ctx: &Context) -> Result<Vec<Op>> {
+    let rows = fetch_prs(5)?;
+    Ok(vec![Op::log(rows.join(","))])
+}
+"#;
+
+    const LUAU_NATIVE_SOURCE: &str = "use noctalia_rs::{Context, Op, Result};\n\n#[luau]\nfn fetch_prs() -> Result<Vec<String>> {\n    let text = std::fs::read_to_string(\"/tmp/x\")?;\n    Ok(vec![text])\n}\n\nfn handler(_ctx: &Context) -> Result<Vec<Op>> {\n    let rows = fetch_prs()?;\n    Ok(vec![Op::log(rows.join(\",\"))])\n}\n";
+
+    const NATIVE_CONTEXT_MANIFEST: &str = "id = \"me/test\"\nname = \"Test\"\n\n[[setting]]\nkey = \"message\"\ntype = \"string\"\nlabel_key = \"settings.message.label\"\ndefault = \"hi\"\n\n[[widget]]\nid = \"widget\"\nentry = \"widget.luau\"\nhandler = \"handler\"\n";
+
+    const NATIVE_CONTEXT_SOURCE: &str = r#"use noctalia_rs::{Context, Op, Result};
+
+fn describe(ctx: &Context) -> Result<String> {
+    let text = std::fs::read_to_string("/tmp/x")?;
+    Ok(format!("{}:{text}", ctx.event))
+}
+
+fn handler(ctx: &Context) -> Result<Vec<Op>> {
+    Ok(vec![Op::log(describe(ctx)?)])
+}
+"#;
+
+    const PLAIN_NATIVE_SOURCE: &str = r#"use noctalia_rs::{Context, Op, Result};
+
+#[native]
+fn now() -> i64 {
+    1
+}
+
+fn handler(_ctx: &Context) -> Result<Vec<Op>> {
+    let value = now();
+    Ok(vec![Op::log(format!("{value}"))])
+}
+"#;
+
+    #[test]
+    fn generate_with_auto_emits_native_dispatch() -> Result<(), BoxError> {
+        let (manifest, dir) = compile_fixture(
+            "native-auto",
+            DISCOVERED_MANIFEST,
+            NATIVE_RESULT_SOURCE,
+        )?;
+        let warnings = generate_with(&manifest, &dir, None)?;
+        let script = fs::read_to_string(dir.join("luau/widget.luau"))?;
+        let native = fs::read_to_string(dir.join("native.rs"))?;
+        let generated = fs::read_to_string(dir.join("generated.rs"))?;
+        fs::remove_dir_all(&dir)?;
+
+        assert!(script.contains("__native.call("), "{script}");
+        assert!(native.contains("\"main::fetch_prs\" => {"), "{native}");
+        assert!(native.contains("serde::de::DeserializeOwned"), "{native}");
+        assert!(
+            native.contains("match crate::fetch_prs(__p_limit)"),
+            "{native}"
+        );
+        assert!(
+            generated.contains(
+                "include!(concat!(env!(\"OUT_DIR\"), \"/native.rs\"));"
+            ),
+            "{generated}"
+        );
+        assert!(
+            generated.contains(".with_native(__noctalia_native::dispatch)"),
+            "{generated}"
+        );
+        assert_eq!(warnings.len(), 1, "{warnings:?}");
+        assert!(
+            warnings[0].starts_with(
+                "entry widget: native `main::fetch_prs` (cache 0 ms): "
+            ),
+            "{}",
+            warnings[0]
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn generate_with_strict_rejects_native_functions() -> Result<(), BoxError> {
+        let manifest = format!("compile = \"strict\"\n{DISCOVERED_MANIFEST}");
+        let (manifest, dir) =
+            compile_fixture("native-strict", &manifest, NATIVE_RESULT_SOURCE)?;
+        let result = generate_with(&manifest, &dir, None);
+        let native_exists = dir.join("native.rs").exists();
+        fs::remove_dir_all(&dir)?;
+
+        let message = result.expect_err("strict rejects native").to_string();
+        assert!(message.contains("src/main.rs:"), "{message}");
+        assert!(!native_exists);
+        Ok(())
+    }
+
+    #[test]
+    fn generate_with_fatal_luau_native_fails_auto() -> Result<(), BoxError> {
+        let (manifest, dir) = compile_fixture(
+            "native-luau",
+            DISCOVERED_MANIFEST,
+            LUAU_NATIVE_SOURCE,
+        )?;
+        let result = generate_with(&manifest, &dir, None);
+        let native_exists = dir.join("native.rs").exists();
+        fs::remove_dir_all(&dir)?;
+
+        let message = result.expect_err("`#[luau]` is fatal").to_string();
+        assert!(message.contains("#[luau]"), "{message}");
+        assert!(message.contains("src/main.rs:"), "{message}");
+        assert!(!native_exists);
+        Ok(())
+    }
+
+    #[test]
+    fn generate_with_fully_compiled_entry_stays_silent() -> Result<(), BoxError>
+    {
+        let (manifest, dir) = compile_fixture(
+            "native-none",
+            DISCOVERED_MANIFEST,
+            COMPILED_HANDLER,
+        )?;
+        fs::write(dir.join("native.rs"), "stale")?;
+        let warnings = generate_with(&manifest, &dir, None)?;
+        let generated = fs::read_to_string(dir.join("generated.rs"))?;
+        let native_exists = dir.join("native.rs").exists();
+        fs::remove_dir_all(&dir)?;
+
+        assert!(warnings.is_empty(), "{warnings:?}");
+        assert!(!native_exists);
+        assert!(!generated.contains("native.rs"), "{generated}");
+        assert!(!generated.contains(".with_native("), "{generated}");
+        assert!(generated.contains("    plugin\n}\n"), "{generated}");
+        Ok(())
+    }
+
+    #[test]
+    fn generate_with_plain_native_uses_direct_value() -> Result<(), BoxError> {
+        let (manifest, dir) = compile_fixture(
+            "native-plain",
+            DISCOVERED_MANIFEST,
+            PLAIN_NATIVE_SOURCE,
+        )?;
+        let warnings = generate_with(&manifest, &dir, None)?;
+        let native = fs::read_to_string(dir.join("native.rs"))?;
+        fs::remove_dir_all(&dir)?;
+
+        assert!(
+            native.contains("serde_json::to_value(crate::now())"),
+            "{native}"
+        );
+        assert!(!native.contains("match crate::now("), "{native}");
+        assert_eq!(warnings.len(), 1, "{warnings:?}");
+        Ok(())
+    }
+
+    #[test]
+    fn generate_with_native_context_builds_the_snapshot() -> Result<(), BoxError>
+    {
+        let (manifest, dir) = compile_fixture(
+            "native-context",
+            NATIVE_CONTEXT_MANIFEST,
+            NATIVE_CONTEXT_SOURCE,
+        )?;
+        let warnings = generate_with(&manifest, &dir, None)?;
+        let native = fs::read_to_string(dir.join("native.rs"))?;
+        let script = fs::read_to_string(dir.join("luau/widget.luau"))?;
+        fs::remove_dir_all(&dir)?;
+
+        assert!(
+            native.contains("context: Option<&noctalia_rs::Context>,"),
+            "{native}"
+        );
+        assert!(
+            native
+                .contains("let __handler_context = __noctalia_context.ok_or("),
+            "{native}"
+        );
+        assert!(
+            native.contains("crate::describe(__handler_context)"),
+            "{native}"
+        );
+        assert!(script.contains("CONFIG_KEYS = { \"message\" }"), "{script}");
+        assert!(
+            script.contains(
+                "__native.call(\"main::describe\", {}, 0, true, true)"
+            ),
+            "{script}"
+        );
+        assert_eq!(warnings.len(), 1, "{warnings:?}");
+        Ok(())
+    }
+
+    const NATIVE_PATH_SOURCE: &str = r#"use noctalia_rs::{Context, Op, Result, native};
+
+#[native]
+fn inspect(path: Option<&Path>) -> bool {
+    path.is_none()
+}
+
+fn handler(_ctx: &Context) -> Result<Vec<Op>> {
+    let missing = inspect(None);
+    Ok(vec![Op::log(format!("{missing}"))])
+}
+"#;
+
+    const NATIVE_ENTRY_SETTINGS_MANIFEST: &str = "id = \"me/test\"\nname = \"Test\"\n\n[[setting]]\nkey = \"shared\"\ntype = \"string\"\nlabel_key = \"settings.shared.label\"\ndefault = \"s\"\n\n[[widget]]\nid = \"widget\"\nentry = \"widget.luau\"\nhandler = \"handler\"\n\n[[widget.setting]]\nkey = \"own\"\ntype = \"string\"\nlabel_key = \"settings.own.label\"\ndefault = \"o\"\n\n[[panel]]\nid = \"panel\"\nentry = \"panel.luau\"\nhandler = \"handler\"\n\n[[panel.setting]]\nkey = \"other\"\ntype = \"string\"\nlabel_key = \"settings.other.label\"\ndefault = \"x\"\n";
+
+    const NATIVE_ENTRY_SETTINGS_SOURCE: &str = r#"use noctalia_rs::{Context, Op, Result, native};
+
+#[native]
+fn describe(ctx: &Context) -> String {
+    ctx.entry.clone()
+}
+
+fn handler(ctx: &Context) -> Result<Vec<Op>> {
+    Ok(vec![Op::log(describe(ctx))])
+}
+"#;
+
+    #[test]
+    fn generate_with_native_path_parameters_import_pathbuf()
+    -> Result<(), BoxError> {
+        let (manifest, dir) = compile_fixture(
+            "native-path",
+            DISCOVERED_MANIFEST,
+            NATIVE_PATH_SOURCE,
+        )?;
+        let _warnings = generate_with(&manifest, &dir, None)?;
+        let native = fs::read_to_string(dir.join("native.rs"))?;
+        fs::remove_dir_all(&dir)?;
+
+        assert!(native.contains("use std::path::PathBuf;"), "{native}");
+        assert!(
+            native.contains("let __p_path: Option<PathBuf> ="),
+            "{native}"
+        );
+        assert!(
+            native.contains("crate::inspect(__p_path.as_deref())"),
+            "{native}"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn generate_with_native_context_uses_only_entry_settings()
+    -> Result<(), BoxError> {
+        let (manifest, dir) = compile_fixture(
+            "native-entry-settings",
+            NATIVE_ENTRY_SETTINGS_MANIFEST,
+            NATIVE_ENTRY_SETTINGS_SOURCE,
+        )?;
+        let _warnings = generate_with(&manifest, &dir, None)?;
+        let script = fs::read_to_string(dir.join("luau/widget.luau"))?;
+        fs::remove_dir_all(&dir)?;
+
+        assert!(
+            script.contains("CONFIG_KEYS = { \"shared\", \"own\" }"),
+            "{script}"
+        );
+        assert!(!script.contains("\"other\""), "{script}");
         Ok(())
     }
 }

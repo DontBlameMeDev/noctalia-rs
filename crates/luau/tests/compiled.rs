@@ -32,8 +32,10 @@ fn compiled_source(entry: &str, handler: &str, kind: EntryKind) -> String {
             state_key: "hello.state",
             kind,
             strings: &["message"],
+            settings: &["message"],
             module: "main",
             modules: &[],
+            native: noctalia_rs_compiler::NativeMode::Deny,
         },
     )
     .expect("compile")
@@ -336,8 +338,10 @@ pub fn handle(ctx: &Context) -> Result<Vec<Op>> {
             state_key: "hello.state",
             kind: EntryKind::Widget,
             strings: &["message"],
+            settings: &["message"],
             module: "main",
             modules: &modules,
+            native: noctalia_rs_compiler::NativeMode::Deny,
         },
     )
     .expect("compile")

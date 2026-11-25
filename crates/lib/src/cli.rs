@@ -1,4 +1,4 @@
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::env;
 use std::fs;
 use std::io::{self, Write};
@@ -7,7 +7,7 @@ use std::process::{self, ExitCode};
 use std::sync::Arc;
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError};
 use std::thread;
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use notify::event::EventKind;
 use notify::{RecursiveMode, Watcher};
@@ -23,11 +23,25 @@ const POLL_INTERVAL: Duration = Duration::from_millis(1);
 // Catch a request if the watcher misses an event.
 const IDLE_WAIT: Duration = Duration::from_secs(1);
 
+const NATIVE_CACHE_LIMIT: usize = 128;
 #[derive(Debug, Deserialize)]
 struct Request {
     boot: String,
     entry: String,
+    #[serde(default)]
     event: String,
+    #[serde(default)]
+    kind: Option<String>,
+    #[serde(default)]
+    id: Option<String>,
+    #[serde(default)]
+    name: Option<String>,
+    #[serde(default)]
+    args: Value,
+    #[serde(default)]
+    cache_ms: Option<u64>,
+    #[serde(default)]
+    context: Value,
     #[serde(default)]
     payload: Value,
     #[serde(default)]
@@ -38,12 +52,20 @@ struct Request {
     host: Value,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum Processed {
+    Entry,
+    Native,
+}
+
 struct Serve<'a, W: Write> {
     plugin: &'a Plugin,
     data_dir: &'a Path,
     spool_dir: &'a Path,
     boot: &'a str,
     stale: BTreeSet<PathBuf>,
+    native_cache: BTreeMap<String, (Instant, Value)>,
+    native_cache_order: VecDeque<String>,
     translations: &'a Value,
     out: &'a mut W,
 }
@@ -81,14 +103,15 @@ impl<W: Write> Serve<'_, W> {
         }
 
         match self.process_request(path) {
-            Ok(()) => self.emit_done(&name)?,
+            Ok(Processed::Entry) => self.emit_done(&name)?,
+            Ok(Processed::Native) => {}
             Err(error) => self.emit_error(&name, &error.to_string())?,
         }
         let _ = fs::remove_file(path);
         Ok(1)
     }
 
-    fn process_request(&mut self, path: &Path) -> Result<()> {
+    fn process_request(&mut self, path: &Path) -> Result<Processed> {
         let text = fs::read_to_string(path)?;
         let request: Request = serde_json::from_str(&text)?;
         if request.boot != self.boot {
@@ -97,6 +120,10 @@ impl<W: Write> Serve<'_, W> {
                 request.boot, self.boot
             )
             .into());
+        }
+        if request.kind.as_deref() == Some("native") {
+            self.process_native(request, path)?;
+            return Ok(Processed::Native);
         }
 
         let parts = Parts {
@@ -119,7 +146,111 @@ impl<W: Write> Serve<'_, W> {
         for op in self.plugin.dispatch(&context)? {
             self.emit_op(&op)?;
         }
-        Ok(())
+        Ok(Processed::Entry)
+    }
+
+    fn process_native(&mut self, request: Request, path: &Path) -> Result<()> {
+        let id = request.id.clone().unwrap_or_else(|| request_name(path));
+        let context = self.native_context(&request);
+        let Some(name) = request.name.clone() else {
+            return self.emit_native_error(&id, "missing native function name");
+        };
+        if name.is_empty() {
+            return self.emit_native_error(&id, "missing native function name");
+        }
+        let args = request.args;
+        let cache_ms = request.cache_ms.unwrap_or(0);
+        let key = if context.is_some() {
+            format!(
+                "{}\0{}",
+                native_key(&name, &args),
+                canonical_json(&stable_context(&request.context))
+            )
+        } else {
+            native_key(&name, &args)
+        };
+        let cached = if cache_ms > 0 {
+            self.cached_native(&key, cache_ms)
+        } else {
+            None
+        };
+        let result = match cached {
+            Some(value) => Ok(value),
+            None => self.plugin.native(&name, args, context.as_ref()),
+        };
+        let value = match result {
+            Ok(value) => value,
+            Err(error) => return self.emit_native_error(&id, &error),
+        };
+        if cache_ms > 0 {
+            self.remember_native(&key, value.clone());
+        }
+        self.emit_native_value(&id, &value)
+    }
+
+    /// Rebuilds the invocation context a `&Context` native parameter sees.
+    fn native_context(&self, request: &Request) -> Option<Context> {
+        if !request.context.is_object() {
+            return None;
+        }
+        let field = |key: &str| {
+            request.context.get(key).cloned().unwrap_or(Value::Null)
+        };
+        Some(Context::new(
+            Parts {
+                entry: request.entry.clone(),
+                event: field("event")
+                    .as_str()
+                    .map_or_else(String::new, str::to_owned),
+                payload: field("payload"),
+                config: field("config"),
+                state: field("state"),
+                host: field("host"),
+                data_dir: self.data_dir.to_path_buf(),
+            },
+            self.translations.clone(),
+        ))
+    }
+
+    fn cached_native(&self, key: &str, cache_ms: u64) -> Option<Value> {
+        let (stored_at, value) = self.native_cache.get(key)?;
+        (stored_at.elapsed() < Duration::from_millis(cache_ms))
+            .then(|| value.clone())
+    }
+
+    fn remember_native(&mut self, key: &str, value: Value) {
+        self.native_cache_order.retain(|item| item != key);
+        self.native_cache_order.push_back(key.to_owned());
+        self.native_cache
+            .insert(key.to_owned(), (Instant::now(), value));
+        if self.native_cache_order.len() > NATIVE_CACHE_LIMIT {
+            self.evict_oldest_native();
+        }
+    }
+
+    fn evict_oldest_native(&mut self) {
+        let oldest = self.native_cache_order.pop_front();
+        if let Some(oldest_key) = oldest {
+            self.native_cache.remove(&oldest_key);
+        }
+    }
+
+    fn emit_native_value(&mut self, id: &str, value: &Value) -> Result<()> {
+        self.emit_json(&json!({
+            "control": "native_result",
+            "id": id,
+            "value": value,
+            "error": Value::Null,
+        }))
+    }
+
+    fn emit_native_error(&mut self, id: &str, error: &str) -> Result<()> {
+        self.emit_json(&json!({
+            "control": "native_result",
+            "id": id,
+            "value": Value::Null,
+            "error": error,
+        }))
     }
 
     fn emit_json(&mut self, value: &Value) -> Result<()> {
@@ -261,6 +392,8 @@ fn serve(plugin: &Plugin, data_dir: &Path, spool_dir: &Path) -> Result<()> {
         spool_dir: &run_dir,
         boot: &boot,
         stale,
+        native_cache: BTreeMap::new(),
+        native_cache_order: VecDeque::new(),
         translations: &translations,
         out: &mut out,
     };
@@ -309,12 +442,49 @@ fn request_name(path: &Path) -> String {
         .map_or_else(|| "unknown".to_owned(), str::to_owned)
 }
 
+/// Drops reads that change on every request, so a cached context call can hit.
+fn stable_context(context: &Value) -> Value {
+    let mut stable = context.clone();
+    if let Some(host) = stable.get_mut("host").and_then(Value::as_object_mut) {
+        host.remove("now_ms");
+    }
+    stable
+}
+
+fn native_key(name: &str, args: &Value) -> String {
+    format!("{name}\0{}", canonical_json(args))
+}
+
+fn canonical_json(value: &Value) -> String {
+    serde_json::to_string(&canonical_value(value)).unwrap_or_default()
+}
+
+fn canonical_value(value: &Value) -> Value {
+    match value {
+        Value::Object(map) => {
+            let mut entries: Vec<(String, Value)> = map
+                .iter()
+                .map(|(key, item)| (key.clone(), canonical_value(item)))
+                .collect();
+            entries.sort_by(|left, right| left.0.cmp(&right.0));
+            Value::Object(entries.into_iter().collect())
+        }
+        Value::Array(items) => {
+            Value::Array(items.iter().map(canonical_value).collect())
+        }
+        Value::Null | Value::Bool(_) | Value::Number(_) | Value::String(_) => {
+            value.clone()
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::{Meta, Op};
     use std::process;
-    use std::time::Instant;
+    use std::result::Result as StdResult;
+    use std::sync::atomic::{AtomicUsize, Ordering};
 
     fn plugin() -> Plugin {
         fn handler(ctx: &Context) -> crate::Result<Vec<Op>> {
@@ -349,6 +519,25 @@ mod tests {
             "config": {},
             "state": {},
             "host": {},
+        })
+    }
+
+    #[expect(clippy::needless_pass_by_value, clippy::too_many_arguments)]
+    fn native_request(
+        boot: &str,
+        name: &str,
+        cache_ms: u64,
+        id: &str,
+        args: Value,
+    ) -> Value {
+        json!({
+            "boot": boot,
+            "kind": "native",
+            "entry": "service",
+            "id": id,
+            "name": name,
+            "args": args,
+            "cache_ms": cache_ms,
         })
     }
     struct TestSpool {
@@ -426,7 +615,7 @@ mod tests {
 
         fn flush(&mut self) -> io::Result<()> {
             self.flushes = self.flushes.saturating_add(1);
-            Ok(())
+            guard_write(&self.buffer, self.stop_after)
         }
     }
 
@@ -449,6 +638,8 @@ mod tests {
             spool_dir: config.spool,
             boot: config.boot,
             stale: config.stale,
+            native_cache: BTreeMap::new(),
+            native_cache_order: VecDeque::new(),
             translations: &Value::Null,
             out: writer,
         };
@@ -669,5 +860,400 @@ mod tests {
         assert_eq!(writer.flushes, lines.len());
 
         spool.cleanup();
+    }
+
+    #[test]
+    fn test_serve_caches_native_results_without_done() {
+        static CALLS: AtomicUsize = AtomicUsize::new(0);
+        #[expect(clippy::unnecessary_wraps)]
+        fn dispatch(
+            _name: &str,
+            _args: Value,
+            _context: Option<&crate::Context>,
+        ) -> StdResult<Value, String> {
+            CALLS.fetch_add(1, Ordering::Relaxed);
+            Ok(json!({ "rows": 1 }))
+        }
+
+        CALLS.store(0, Ordering::Relaxed);
+        let spool = TestSpool::new("serve-native-cache");
+        let args = json!({ "b": 2, "a": 1 });
+        spool.write(
+            "000000000001.json",
+            &native_request(
+                "boot-native-cache",
+                "rows",
+                1000,
+                "first",
+                args.clone(),
+            ),
+        );
+        spool.write(
+            "000000000002.json",
+            &native_request(
+                "boot-native-cache",
+                "rows",
+                1000,
+                "second",
+                args.clone(),
+            ),
+        );
+        spool.write(
+            "000000000003.json",
+            &native_request("boot-native-cache", "rows", 0, "third", args),
+        );
+        let plugin = Plugin::new(Meta::new("me/hello", "Hello", "0.1.0"))
+            .with_native(dispatch);
+
+        let writer = Capture {
+            plugin: &plugin,
+            data: &spool.data,
+            spool: &spool.spool,
+            boot: "boot-native-cache",
+            stale: BTreeSet::new(),
+            stop_after: 4,
+        }
+        .run();
+        let lines = writer.lines();
+
+        assert_eq!(lines.len(), 4);
+        for (line, id) in lines.iter().skip(1).zip(["first", "second", "third"])
+        {
+            let value: Value = serde_json::from_str(line).expect("native line");
+            assert_eq!(
+                value,
+                json!({
+                    "control": "native_result",
+                    "id": id,
+                    "value": { "rows": 1 },
+                    "error": null,
+                })
+            );
+        }
+        assert!(!lines.iter().any(|line| line.contains("\"done\"")));
+        assert_eq!(CALLS.load(Ordering::Relaxed), 2);
+        spool.cleanup();
+    }
+
+    #[test]
+    fn test_serve_caches_canonical_args() {
+        static CALLS: AtomicUsize = AtomicUsize::new(0);
+        #[expect(clippy::unnecessary_wraps)]
+        fn dispatch(
+            _name: &str,
+            _args: Value,
+            _context: Option<&crate::Context>,
+        ) -> StdResult<Value, String> {
+            CALLS.fetch_add(1, Ordering::Relaxed);
+            Ok(json!({ "ok": true }))
+        }
+
+        CALLS.store(0, Ordering::Relaxed);
+        let spool = TestSpool::new("serve-native-canonical");
+        let nested = json!({ "y": 2, "x": 1 });
+        let reordered = json!({ "x": 1, "y": 2 });
+        spool.write(
+            "000000000001.json",
+            &native_request(
+                "boot-native-canonical",
+                "decode",
+                1000,
+                "one",
+                json!({ "outer": nested, "list": [reordered] }),
+            ),
+        );
+        spool.write(
+            "000000000002.json",
+            &native_request(
+                "boot-native-canonical",
+                "decode",
+                1000,
+                "two",
+                json!({ "list": [json!({ "y": 2, "x": 1 })], "outer": json!({ "x": 1, "y": 2 }) }),
+            ),
+        );
+        let plugin = Plugin::new(Meta::new("me/hello", "Hello", "0.1.0"))
+            .with_native(dispatch);
+
+        let writer = Capture {
+            plugin: &plugin,
+            data: &spool.data,
+            spool: &spool.spool,
+            boot: "boot-native-canonical",
+            stale: BTreeSet::new(),
+            stop_after: 3,
+        }
+        .run();
+        let lines = writer.lines();
+
+        assert_eq!(lines.len(), 3);
+        assert_eq!(CALLS.load(Ordering::Relaxed), 1);
+        assert_eq!(
+            canonical_json(&json!({ "b": { "d": 1, "c": 2 }, "a": 3 })),
+            "{\"a\":3,\"b\":{\"c\":2,\"d\":1}}"
+        );
+        spool.cleanup();
+    }
+
+    #[test]
+    fn test_serve_reports_native_dispatch_error_as_result() {
+        fn dispatch(
+            _name: &str,
+            _args: Value,
+            _context: Option<&crate::Context>,
+        ) -> StdResult<Value, String> {
+            Err("native exploded".to_owned())
+        }
+
+        let spool = TestSpool::new("serve-native-error");
+        spool.write(
+            "000000000001.json",
+            &native_request(
+                "boot-native-error",
+                "fails",
+                0,
+                "failed",
+                json!({}),
+            ),
+        );
+        let plugin = Plugin::new(Meta::new("me/hello", "Hello", "0.1.0"))
+            .with_native(dispatch);
+
+        let writer = Capture {
+            plugin: &plugin,
+            data: &spool.data,
+            spool: &spool.spool,
+            boot: "boot-native-error",
+            stale: BTreeSet::new(),
+            stop_after: 2,
+        }
+        .run();
+        let lines = writer.lines();
+
+        assert_eq!(lines.len(), 2);
+        let value: Value =
+            serde_json::from_str(&lines[1]).expect("native line");
+        assert_eq!(
+            value,
+            json!({
+                "control": "native_result",
+                "id": "failed",
+                "value": null,
+                "error": "native exploded",
+            })
+        );
+        assert!(!lines.iter().any(|line| line.contains("\"done\"")));
+        spool.cleanup();
+    }
+
+    #[test]
+    fn test_serve_reports_unknown_and_malformed_native_requests() {
+        let spool = TestSpool::new("serve-native-unknown");
+        spool.write(
+            "000000000001.json",
+            &native_request(
+                "boot-native-unknown",
+                "missing",
+                0,
+                "unknown",
+                json!({}),
+            ),
+        );
+        spool.write(
+            "000000000002.json",
+            &json!({
+                "boot": "boot-native-unknown",
+                "kind": "native",
+                "entry": "service",
+                "args": {},
+                "cache_ms": 0,
+            }),
+        );
+        let plugin = plugin();
+
+        let writer = Capture {
+            plugin: &plugin,
+            data: &spool.data,
+            spool: &spool.spool,
+            boot: "boot-native-unknown",
+            stale: BTreeSet::new(),
+            stop_after: 3,
+        }
+        .run();
+        let lines = writer.lines();
+
+        assert_eq!(lines.len(), 3);
+        let unknown: Value =
+            serde_json::from_str(&lines[1]).expect("unknown line");
+        assert_eq!(
+            unknown,
+            json!({
+                "control": "native_result",
+                "id": "unknown",
+                "value": null,
+                "error": "unknown native function `missing`",
+            })
+        );
+        let malformed: Value =
+            serde_json::from_str(&lines[2]).expect("malformed line");
+        assert_eq!(
+            malformed,
+            json!({
+                "control": "native_result",
+                "id": "000000000002.json",
+                "value": null,
+                "error": "missing native function name",
+            })
+        );
+        spool.cleanup();
+    }
+
+    #[test]
+    fn test_serve_keeps_stale_boot_handling_for_native_requests() {
+        #[expect(clippy::unnecessary_wraps)]
+        fn dispatch(
+            _name: &str,
+            _args: Value,
+            _context: Option<&crate::Context>,
+        ) -> StdResult<Value, String> {
+            Ok(json!({ "rows": 1 }))
+        }
+
+        let spool = TestSpool::new("serve-native-stale");
+        spool.write(
+            "000000000001.json",
+            &native_request("old-boot", "rows", 0, "old", json!({})),
+        );
+        spool.write(
+            "000000000002.json",
+            &native_request("boot-native-stale", "rows", 0, "fresh", json!({})),
+        );
+        let plugin = Plugin::new(Meta::new("me/hello", "Hello", "0.1.0"))
+            .with_native(dispatch);
+
+        let writer = Capture {
+            plugin: &plugin,
+            data: &spool.data,
+            spool: &spool.spool,
+            boot: "boot-native-stale",
+            stale: BTreeSet::new(),
+            stop_after: 3,
+        }
+        .run();
+        let lines = writer.lines();
+
+        assert_eq!(lines.len(), 3);
+        assert!(lines[1].contains("\"control\":\"error\""));
+        assert!(lines[1].contains("stale boot"));
+        let fresh: Value = serde_json::from_str(&lines[2]).expect("fresh line");
+        assert_eq!(fresh["control"], "native_result");
+        assert_eq!(fresh["id"], "fresh");
+        spool.cleanup();
+    }
+
+    #[test]
+    fn test_native_cache_evicts_oldest_inserted_entry() {
+        let mut out: Vec<u8> = Vec::new();
+        let plugin = plugin();
+        let translations = Value::Null;
+        let mut server = Serve {
+            plugin: &plugin,
+            data_dir: Path::new("/tmp"),
+            spool_dir: Path::new("/tmp"),
+            boot: "boot",
+            stale: BTreeSet::new(),
+            native_cache: BTreeMap::new(),
+            native_cache_order: VecDeque::new(),
+            translations: &translations,
+            out: &mut out,
+        };
+
+        for index in 0..NATIVE_CACHE_LIMIT {
+            server.remember_native(&format!("name-{index}"), json!(index));
+        }
+        server.remember_native("latest", json!(128));
+
+        assert!(!server.native_cache.contains_key("name-0"));
+        assert!(server.native_cache.contains_key("name-1"));
+        assert!(server.native_cache.contains_key("latest"));
+        assert_eq!(server.native_cache_order.len(), NATIVE_CACHE_LIMIT);
+    }
+
+    #[test]
+    fn test_serve_rebuilds_the_native_context() {
+        static CALLS: AtomicUsize = AtomicUsize::new(0);
+        fn dispatch(
+            _name: &str,
+            _args: Value,
+            context: Option<&crate::Context>,
+        ) -> StdResult<Value, String> {
+            CALLS.fetch_add(1, Ordering::Relaxed);
+            let handler = context.ok_or("missing context")?;
+            Ok(json!({
+                "event": handler.event,
+                "payload": handler.payload,
+                "config": handler.config,
+                "state": handler.state,
+                "now_ms": handler.now_ms,
+                "data_dir": handler.data_dir.to_string_lossy(),
+            }))
+        }
+
+        CALLS.store(0, Ordering::Relaxed);
+        let spool = TestSpool::new("serve-native-context");
+        let mut first = native_request(
+            "boot-native-context",
+            "describe",
+            1000,
+            "first",
+            json!({ "value": 1 }),
+        );
+        first["context"] = json!({
+            "event": "click",
+            "payload": { "id": "a" },
+            "config": { "message": "hi" },
+            "state": { "count": 2 },
+            "host": { "now_ms": 1_700_000_000 },
+        });
+        let mut second = first.clone();
+        second["id"] = json!("second");
+        // Same arguments, different event: the context is part of the cache key.
+        second["context"]["event"] = json!("render");
+        let mut third = first.clone();
+        third["id"] = json!("third");
+        // Only the clock moved: that is not part of the key.
+        third["context"]["host"]["now_ms"] = json!(1_700_000_999);
+        spool.write("000000000001.json", &first);
+        spool.write("000000000002.json", &second);
+        spool.write("000000000003.json", &third);
+        let plugin = Plugin::new(Meta::new("me/hello", "Hello", "0.1.0"))
+            .with_native(dispatch);
+
+        let writer = Capture {
+            plugin: &plugin,
+            data: &spool.data,
+            spool: &spool.spool,
+            boot: "boot-native-context",
+            stale: BTreeSet::new(),
+            stop_after: 4,
+        }
+        .run();
+        let lines = writer.lines();
+        spool.cleanup();
+
+        assert_eq!(CALLS.load(Ordering::Relaxed), 2);
+        let results: Vec<Value> = lines
+            .iter()
+            .filter(|line| line.contains("native_result"))
+            .map(|line| serde_json::from_str(line).expect("json"))
+            .collect();
+        assert_eq!(results.len(), 3, "{lines:?}");
+        assert_eq!(results[0]["value"]["event"], "click");
+        assert_eq!(results[0]["value"]["payload"]["id"], "a");
+        assert_eq!(results[0]["value"]["config"]["message"], "hi");
+        assert_eq!(results[0]["value"]["state"]["count"], 2);
+        assert_eq!(results[0]["value"]["now_ms"], 1_700_000_000_i64);
+        assert_eq!(results[1]["value"]["event"], "render");
+        assert_eq!(results[2]["value"]["now_ms"], 1_700_000_000_i64);
     }
 }

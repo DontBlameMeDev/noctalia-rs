@@ -400,8 +400,10 @@ fn compile_fixture(plan: &Plan, handler: &str) -> Result<String> {
             state_key: plan.state_key,
             kind: plan.kind,
             strings: &["message", "prefix", "name"],
+            settings: &["message", "prefix", "name"],
             module: "main",
             modules: &[],
+            native: noctalia_rs_compiler::NativeMode::Deny,
         },
     )
     .map_err(|error| format!("{}: {error}", plan.workload))?;
