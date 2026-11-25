@@ -24,7 +24,7 @@ permissions:
 
 # Dependencies first: macros and build generate for lib, lib for luau.
 env:
-  CRATES: noctalia-rs-build noctalia-rs-macros noctalia-rs noctalia-rs-luau
+  CRATES: noctalia-rs-compiler noctalia-rs-build noctalia-rs-macros noctalia-rs noctalia-rs-luau
   INDEX_URL: https://crates.io/api/v1/crates
 
 jobs:
