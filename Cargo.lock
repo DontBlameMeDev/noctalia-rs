@@ -356,7 +356,7 @@ dependencies = [
 
 [[package]]
 name = "noctalia-bench"
-version = "0.2.1"
+version = "0.3.0"
 dependencies = [
  "chrono",
  "noctalia-rs",
@@ -369,7 +369,7 @@ dependencies = [
 
 [[package]]
 name = "noctalia-example"
-version = "0.2.1"
+version = "0.3.0"
 dependencies = [
  "noctalia-rs",
  "serde",
@@ -378,7 +378,7 @@ dependencies = [
 
 [[package]]
 name = "noctalia-rs"
-version = "0.2.1"
+version = "0.3.0"
 dependencies = [
  "chrono",
  "noctalia-rs-compiler",
@@ -392,7 +392,7 @@ dependencies = [
 
 [[package]]
 name = "noctalia-rs-build"
-version = "0.2.1"
+version = "0.3.0"
 dependencies = [
  "noctalia-rs-compiler",
  "syn 3.0.10",
@@ -401,7 +401,7 @@ dependencies = [
 
 [[package]]
 name = "noctalia-rs-compiler"
-version = "0.2.1"
+version = "0.3.0"
 dependencies = [
  "proc-macro2",
  "syn 3.0.10",
@@ -409,7 +409,7 @@ dependencies = [
 
 [[package]]
 name = "noctalia-rs-luau"
-version = "0.2.1"
+version = "0.3.0"
 dependencies = [
  "chrono",
  "mlua",
@@ -420,7 +420,7 @@ dependencies = [
 
 [[package]]
 name = "noctalia-rs-macros"
-version = "0.2.1"
+version = "0.3.0"
 dependencies = [
  "proc-macro2",
  "quote",
