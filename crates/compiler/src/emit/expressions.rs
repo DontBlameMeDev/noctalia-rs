@@ -105,20 +105,29 @@ impl<'a> Emitter<'a> {
                 self.line(&format!("if {condition} then"));
                 self.indent = self.indent.saturating_add(1);
                 let (value, ty) = self.block_value(&item.then_branch)?;
-                self.line(&format!("{name} = {value}"));
+                let mut result = ty;
+                if !value.is_empty() && ty.base != Base::Void {
+                    self.line(&format!("{name} = {value}"));
+                } else {
+                    result = Ty::VALUE;
+                }
                 self.indent = self.indent.saturating_sub(1);
                 if let Some((_, branch)) = &item.else_branch {
                     self.line("else");
                     self.indent = self.indent.saturating_add(1);
-                    let (value, _) = match &**branch {
+                    let (value, ty) = match &**branch {
                         Expr::Block(block) => self.block_value(&block.block)?,
                         other => self.expr(other)?,
                     };
-                    self.line(&format!("{name} = {value}"));
+                    if !value.is_empty() && ty.base != Base::Void {
+                        self.line(&format!("{name} = {value}"));
+                    } else {
+                        result = Ty::VALUE;
+                    }
                     self.indent = self.indent.saturating_sub(1);
                 }
                 self.line("end");
-                Ok((name, ty))
+                Ok((name, result))
             }
             Expr::Array(array) => {
                 let mut values = Vec::new();
@@ -640,7 +649,13 @@ impl<'a> Emitter<'a> {
                         .to_owned(),
                     Ty::STR,
                 )),
-                "config" => Ok(("noctalia".to_owned(), Ty::VALUE)),
+                "config" => {
+                    if self.strict() {
+                        self.uses_config_table = true;
+                        return Ok(("CONFIG".to_owned(), Ty::VALUE));
+                    }
+                    Ok(("noctalia".to_owned(), Ty::VALUE))
+                }
                 other => Err(Error::at(
                     field.member.span(),
                     format!(
@@ -1087,7 +1102,13 @@ pub(super) fn is_vec_new(call: &ExprCall) -> bool {
 
 pub(super) fn multi_return(expr: &Expr) -> bool {
     match expr {
-        Expr::MethodCall(call) => call.method.to_string().ends_with("_result"),
+        Expr::MethodCall(call) => {
+            call.method.to_string().ends_with("_result")
+                || matches!(
+                    call.method.to_string().as_str(),
+                    "query_pair" | "query_response"
+                )
+        }
         Expr::Call(call) => path_last_name(&call.func)
             .is_some_and(|name| name.ends_with("_result")),
         _ => false,
