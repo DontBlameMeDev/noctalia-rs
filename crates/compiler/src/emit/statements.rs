@@ -531,17 +531,17 @@ impl<'a> Emitter<'a> {
                 self.value_needed = saved_value;
                 let (text, ty) = result?;
                 if ty.base == Base::Void {
-                    if !text.is_empty() {
-                        if text.starts_with('(') || text.starts_with('{') {
-                            self.line("do");
-                            self.indent = self.indent.saturating_add(1);
-                            self.line(&text);
-                            self.indent = self.indent.saturating_sub(1);
-                            self.line("end");
-                        } else {
-                            self.line(&text);
-                        }
+                    if text.starts_with('(') || text.starts_with('{') {
+                        self.line("do");
+                        self.indent = self.indent.saturating_add(1);
+                        self.line(&text);
+                        self.indent = self.indent.saturating_sub(1);
+                        self.line("end");
+                    } else if text.contains('(') {
+                        self.line(&text);
                     }
+                    // Anything else is a temp: the call already ran on its
+                    // own `local` line, and a bare name is not a statement.
                     self.emitted = true;
                     return Ok(());
                 }
@@ -716,10 +716,14 @@ impl<'a> Emitter<'a> {
         };
         let (condition, bindings) =
             self.pattern_match(&value, &item.pat, error.as_deref())?;
+        let class = self.pending_class.take();
         for (name, text) in bindings {
             let binding = self.binding_ty(&item.pat, &name, ty);
             self.line(&format!("local {name} = {text}"));
             self.push(&name, binding);
+            if let Some(class) = &class {
+                self.classes.insert(name.clone(), class.clone());
+            }
         }
         Ok(condition)
     }
@@ -1637,22 +1641,15 @@ impl<'a> Emitter<'a> {
             let Some(name) = name else {
                 continue;
             };
+            // A tuple binding unpacks one element of a list of tuples. Under
+            // `enumerate` the second binding is the element itself.
+            let unpack = !enumerate && matches!(&*item.pat, Pat::Tuple(_));
             let value = if enumerate && position == 0 {
                 format!("({index} - 1)")
-            } else if !enumerate
-                && bindings.len() == 1
-                && matches!(&*item.pat, Pat::Ident(_))
-            {
-                format!("{source}[{index}]")
+            } else if unpack {
+                format!("{source}[{index}][{}]", position + 1)
             } else {
-                format!(
-                    "{source}[{index}]{}",
-                    if enumerate {
-                        String::new()
-                    } else {
-                        format!("[{}]", position + 1)
-                    }
-                )
+                format!("{source}[{index}]")
             };
             let binding_ty = if enumerate && position == 0 {
                 Ty::INT
