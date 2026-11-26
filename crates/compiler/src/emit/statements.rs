@@ -68,6 +68,25 @@ impl<'a> Emitter<'a> {
                 if ty.base != Base::Void {
                     if let Some(target) = self.tail_target.clone() {
                         self.line(&format!("{target} = {text}"));
+                        self.last_value_ty = Some(ty);
+                        if let Expr::Tuple(items) = strip_reference(expr) {
+                            let shapes = self.tuple_shapes(
+                                &items
+                                    .elems
+                                    .iter()
+                                    .cloned()
+                                    .collect::<Vec<_>>(),
+                            )?;
+                            self.tuple_expr_shapes
+                                .insert(target.clone(), shapes);
+                        } else if let Some(source) =
+                            path_ident(strip_reference(expr))
+                            && let Some(shapes) =
+                                self.tuple_types.get(&source).cloned()
+                        {
+                            self.tuple_expr_shapes
+                                .insert(target.clone(), shapes);
+                        }
                     } else {
                         self.line(&format!("return {text}"));
                     }
@@ -103,13 +122,78 @@ impl<'a> Emitter<'a> {
                     },
                 )?;
             let multi = multi_return(initializer);
-            let (text, _) = self.expr(initializer)?;
+            let mut shapes: Vec<TupleShape> = Vec::new();
+            let text = if let Expr::Tuple(items) = strip_reference(initializer)
+                && !multi
+            {
+                let mut parts = Vec::new();
+                for item in &items.elems {
+                    let (value, ty) = self.expr(item)?;
+                    let shape = if let Expr::Tuple(inner) =
+                        strip_reference(item)
+                    {
+                        TupleShape::Tuple(self.tuple_shapes(
+                            &inner.elems.iter().cloned().collect::<Vec<_>>(),
+                        )?)
+                    } else {
+                        TupleShape::Leaf(ty)
+                    };
+                    shapes.push(shape);
+                    parts.push(value);
+                }
+                format!("{{ {} }}", parts.join(", "))
+            } else {
+                self.unknown_value_tuple = false;
+                let (text, _) = self.expr(initializer)?;
+                shapes = self.last_tuple_shape.take().unwrap_or_default();
+                if shapes.is_empty() && self.unknown_value_tuple {
+                    return Err(Error::at(
+                        local.pat.span(),
+                        "tuple destructuring needs a tuple initializer with known element types",
+                    ));
+                }
+                self.unknown_value_tuple = false;
+                text
+            };
+            if shapes.is_empty()
+                && let Some(types) = path_ident(strip_reference(initializer))
+                    .and_then(|name| self.tuple_types.get(&name))
+            {
+                shapes = types.to_vec();
+            }
+            if shapes.is_empty()
+                && let Some(types) = self.tuple_expr_shapes.get(&text)
+            {
+                shapes = types.to_vec();
+            } else if shapes.is_empty() {
+            }
+            let element_ty = |index: usize| {
+                let mut ty = match shapes.get(index) {
+                    Some(TupleShape::Leaf(ty)) => *ty,
+                    Some(TupleShape::Tuple(parts)) => Ty {
+                        null: parts.iter().any(TupleShape::any_null),
+                        ..Ty::VALUE
+                    },
+                    None => Ty::VALUE,
+                };
+                if ty.null {
+                    ty.element = None;
+                }
+                ty
+            };
             let mut names = Vec::new();
             for element in &tuple.elems {
                 match element {
                     Pat::Ident(pattern) => {
                         let name = self.binding_name(pattern)?;
-                        self.push(&name, Ty::VALUE);
+                        let index = names.len();
+                        if let Some(TupleShape::Tuple(parts)) =
+                            shapes.get(index)
+                        {
+                            self.tuple_types
+                                .insert(name.clone(), parts.to_vec());
+                        }
+                        self.push(&name, element_ty(index));
                         names.push(name);
                     }
                     Pat::Wild(_) => names.push("_".to_owned()),
@@ -122,9 +206,15 @@ impl<'a> Emitter<'a> {
                 }
             }
             if multi {
-                for name in &names {
+                for (index, name) in names.iter().enumerate() {
                     if name != "_" {
-                        self.push(name, Ty::OPT_VALUE);
+                        if let Some(TupleShape::Tuple(parts)) =
+                            shapes.get(index)
+                        {
+                            self.tuple_types
+                                .insert(name.clone(), parts.to_vec());
+                        }
+                        self.push(name, element_ty(index));
                     }
                 }
                 self.line(&format!("local {} = {text}", names.join(", ")));
@@ -174,7 +264,7 @@ impl<'a> Emitter<'a> {
         if let Expr::Call(call) = &*init.expr
             && is_vec_new(call)
         {
-            self.line(&format!("local {name} = {{}}"));
+            self.line(&format!("local {name} = {}", empty_array()));
             self.push(&name, Ty::OPS);
             return Ok(());
         }
@@ -210,6 +300,91 @@ impl<'a> Emitter<'a> {
         let result = self.expr(&init.expr);
         self.value_needed = saved_value;
         let (text, mut ty) = result?;
+        if let Expr::Tuple(items) = strip_reference(&init.expr) {
+            let element_types = self.tuple_shapes(
+                &items.elems.iter().cloned().collect::<Vec<_>>(),
+            )?;
+            self.tuple_types.insert(name.clone(), element_types);
+        } else if let Some(shapes) = self.last_tuple_shape.take() {
+            self.tuple_types.insert(name.clone(), shapes.clone());
+            self.tuple_expr_shapes.insert(name.clone(), shapes);
+        } else if let Some(shapes) = self.tuple_expr_shapes.get(&text).cloned()
+        {
+            self.tuple_types.insert(name.clone(), shapes.clone());
+            self.tuple_expr_shapes.insert(name.clone(), shapes);
+        } else if let Expr::Struct(item) = strip_reference(&init.expr)
+            && let Some(class) =
+                self.class_of_receiver(&init.expr).or_else(|| {
+                    item.path.segments.last().map(|s| s.ident.to_string())
+                })
+        {
+            let prefix = format!("{class}.");
+            let inherited = self
+                .tuple_expr_shapes
+                .iter()
+                .filter_map(|(key, shapes)| {
+                    key.strip_prefix(&prefix)
+                        .map(|field| (field.to_owned(), shapes.clone()))
+                })
+                .collect::<Vec<_>>();
+            for (field, shapes) in inherited {
+                self.tuple_expr_shapes
+                    .insert(format!("{name}.{field}"), shapes);
+            }
+            for field in &item.fields {
+                if let syn::Member::Named(member) = &field.member
+                    && let Expr::Tuple(items) = strip_reference(&field.expr)
+                {
+                    let shapes = self.tuple_shapes(
+                        &items.elems.iter().cloned().collect::<Vec<_>>(),
+                    )?;
+                    self.tuple_expr_shapes
+                        .insert(format!("{name}.{member}"), shapes);
+                }
+            }
+            let _ = class;
+        } else if let Some(source) = path_ident(strip_reference(&init.expr)) {
+            if let Some(types) = self.tuple_types.get(&source).cloned() {
+                self.tuple_types.insert(name.clone(), types);
+            }
+            if let Some(origin) = self.tuple_expr_text.get(&source).cloned()
+                && let Some(shapes) =
+                    self.tuple_expr_shapes.get(&origin).cloned()
+            {
+                self.tuple_expr_shapes.insert(name.clone(), shapes);
+            }
+            let prefix = format!("{source}.");
+            let fields = self
+                .tuple_expr_shapes
+                .iter()
+                .filter_map(|(key, shapes)| {
+                    key.strip_prefix(&prefix)
+                        .map(|field| (field.to_owned(), shapes.clone()))
+                })
+                .collect::<Vec<_>>();
+            for (field, shapes) in fields {
+                self.tuple_expr_shapes
+                    .insert(format!("{name}.{field}"), shapes);
+            }
+        }
+        if !text.is_empty() {
+            self.tuple_expr_text.insert(name.clone(), text.clone());
+        }
+        if let Expr::Call(call) = strip_reference(&init.expr)
+            && call.args.len() == 1
+            && path_last_name(&call.func).is_some_and(|newtype| {
+                self.program.is_newtype(&self.module, &newtype)
+            })
+        {
+            let value_ty = self
+                .expr(arg(&call.args.iter().collect::<Vec<_>>(), 0, call)?)?
+                .1;
+            self.newtype_types.insert(name.clone(), value_ty);
+        } else if let Some(ty) = path_ident(strip_reference(&init.expr))
+            .and_then(|source| self.newtype_types.get(&source).copied())
+        {
+            self.newtype_types.insert(name.clone(), ty);
+        }
         if ty.result
             && let Some(hint) = hint
         {
@@ -226,6 +401,12 @@ impl<'a> Emitter<'a> {
         }
         if let Some(class) = self.pending_class.take() {
             self.classes.insert(name.clone(), class);
+        }
+        if let Some(nulls) = self.pending_null_fields.take() {
+            self.null_fields.insert(name.clone(), nulls);
+        }
+        if text == "nil" {
+            ty.null = true;
         }
         self.push(&name, ty);
         Ok(())
@@ -250,8 +431,9 @@ impl<'a> Emitter<'a> {
         let (condition, bindings) =
             self.pattern_match(&value, pattern, error.as_deref())?;
         for (name, text) in bindings {
+            let binding = self.binding_ty(pattern, &name, ty);
             self.line(&format!("local {name} = {text}"));
-            self.push(&name, Ty::VALUE);
+            self.push(&name, binding);
         }
         self.line(&format!("if not ({condition}) then"));
         self.indent = self.indent.saturating_add(1);
@@ -535,8 +717,9 @@ impl<'a> Emitter<'a> {
         let (condition, bindings) =
             self.pattern_match(&value, &item.pat, error.as_deref())?;
         for (name, text) in bindings {
+            let binding = self.binding_ty(&item.pat, &name, ty);
             self.line(&format!("local {name} = {text}"));
-            self.push(&name, Ty::VALUE);
+            self.push(&name, binding);
         }
         Ok(condition)
     }
@@ -732,8 +915,9 @@ impl<'a> Emitter<'a> {
             self.indent = self.indent.saturating_add(1);
             self.scopes.push(HashMap::new());
             for (name, text) in bindings {
+                let binding = self.binding_ty(pattern, &name, scrutinee_ty);
                 self.line(&format!("local {name} = {text}"));
-                self.push(&name, Ty::VALUE);
+                self.push(&name, binding);
             }
             if let Some(guard) = guard {
                 let (text, _) = self.expr(guard)?;
@@ -767,7 +951,7 @@ impl<'a> Emitter<'a> {
         Ok(name)
     }
 
-    fn pattern_match(
+    pub(super) fn pattern_match(
         &self,
         value: &str,
         pattern: &Pat,
@@ -945,6 +1129,96 @@ impl<'a> Emitter<'a> {
                 pattern.span(),
                 "match pattern is not supported by the Luau compiler",
             )),
+        }
+    }
+
+    /// The static type a pattern binds, so `Value::String(text)` reads as a
+    /// string and `Some(items)` keeps the scrutee's array shape.
+    pub(super) fn binding_ty(
+        &self,
+        pattern: &Pat,
+        name: &str,
+        outer: Ty,
+    ) -> Ty {
+        match pattern {
+            Pat::Ident(item) => {
+                if item.ident == name {
+                    Ty {
+                        optional: false,
+                        result: false,
+                        ..outer
+                    }
+                } else {
+                    Ty::VALUE
+                }
+            }
+            Pat::Or(or) => or
+                .cases
+                .iter()
+                .map(|case| self.binding_ty(case, name, outer))
+                .find(|ty| *ty != Ty::VALUE)
+                .unwrap_or(Ty::VALUE),
+            Pat::Path(path) => {
+                let last = path
+                    .path
+                    .segments
+                    .last()
+                    .map(|segment| segment.ident.to_string())
+                    .unwrap_or_default();
+                if last == "Null" { Ty::NULL } else { Ty::VALUE }
+            }
+            Pat::Paren(paren) => self.binding_ty(&paren.pat, name, outer),
+            Pat::Reference(reference) => {
+                self.binding_ty(&reference.pat, name, outer)
+            }
+            Pat::TupleStruct(item) => {
+                let kind = item
+                    .path
+                    .segments
+                    .last()
+                    .map(|segment| segment.ident.to_string())
+                    .unwrap_or_default();
+                let inner = match kind.as_str() {
+                    "Some" | "Ok" | "Err" => {
+                        // A matched Some/Ok/Err holds a present value; the
+                        // Option's own nullness describes None, not the inner
+                        // value. A nested `Null` pattern reintroduces null.
+                        let mut present = outer;
+                        if present.optional {
+                            present.null = false;
+                        }
+                        present
+                    }
+                    "String" => Ty::STR,
+                    "Bool" => Ty::BOOL,
+                    // An integral double is an integer in Luau, so number
+                    // formatting goes through the JSON encoder instead.
+                    "Number" => Ty::VALUE,
+                    "Null" => Ty::NULL,
+                    "Object" => Ty::TABLE,
+                    "Array" => Ty::LIST,
+                    _ => Ty::VALUE,
+                };
+                item.elems
+                    .iter()
+                    .map(|element| self.binding_ty(element, name, inner))
+                    .find(|ty| ty.null || *ty != Ty::VALUE)
+                    .unwrap_or(Ty::VALUE)
+            }
+            Pat::Tuple(tuple) => tuple
+                .elems
+                .iter()
+                .map(|element| {
+                    let inner = Ty {
+                        optional: false,
+                        result: false,
+                        ..outer
+                    };
+                    self.binding_ty(element, name, inner)
+                })
+                .find(|ty| *ty != Ty::VALUE)
+                .unwrap_or(Ty::VALUE),
+            _ => Ty::VALUE,
         }
     }
 
@@ -1159,7 +1433,24 @@ impl<'a> Emitter<'a> {
                 "`enumerate()` needs a two-element tuple binding",
             ));
         }
+        let is_iterator = false;
         let (text, ty) = self.expr(iterable)?;
+        if is_iterator {
+            let values = self.temp();
+            self.line(&format!(
+                "local {values} = (function() local __cursor = ({text}); local __meta = getmetatable(__cursor); local __out = {{}}; while true do local __position = (__meta and __meta.{CURSOR_MARKER} or (__cursor.__next or 0)) + 1; local __value = __cursor[__position]; if __value == nil then break end; __out[#__out + 1] = __value; if __meta and __meta.{CURSOR_MARKER} ~= nil then __meta.{CURSOR_MARKER} = __position end end; return __out end)()"
+            ));
+            let source = self.temp();
+            self.line(&format!("local {source} = {values}"));
+            let name = bindings[0].clone().unwrap_or_default();
+            self.push(&name, Ty::STR);
+            self.line(&format!("for _, {name} in ipairs({source}) do"));
+            self.indent = self.indent.saturating_add(1);
+            self.statement_block(&item.body)?;
+            self.indent = self.indent.saturating_sub(1);
+            self.line("end");
+            return Ok(());
+        }
         if ty.base != Base::List
             && ty.base != Base::Value
             && ty.base != Base::Table
@@ -1178,25 +1469,113 @@ impl<'a> Emitter<'a> {
                     "`enumerate()` needs a list, not a map",
                 ));
             }
+            let sorted = matches!(
+                iterable,
+                Expr::MethodCall(call)
+                    if matches!(
+                        call.method.to_string().as_str(),
+                        "iter" | "into_iter"
+                    )
+            );
+            if sorted {
+                let names = bindings
+                    .iter()
+                    .map(|name| name.clone().unwrap_or_else(|| "_".to_owned()))
+                    .collect::<Vec<_>>();
+                let keys = self.temp();
+                let index = self.temp();
+                self.line(&format!("local {keys} = {{}}"));
+                self.line(&format!(
+                    "for __key in pairs({source}) do {keys}[#({keys}) + 1] = __key end"
+                ));
+                self.line(&format!(
+                    "table.sort({keys}, function(a, b) return tostring(a) < tostring(b) end)"
+                ));
+                self.line(&format!("for {index} = 1, #{keys} do"));
+                self.indent = self.indent.saturating_add(1);
+                match names.as_slice() {
+                    [name] => {
+                        self.push(name, Ty::VALUE);
+                        self.line(&format!(
+                            "local {name} = {source}[{keys}[{index}]]"
+                        ));
+                    }
+                    [first, second] => {
+                        for (position, name) in
+                            bindings.iter().flatten().enumerate()
+                        {
+                            self.push(name, self.key_ty(position));
+                        }
+                        self.line(&format!("local {first} = {keys}[{index}]"));
+                        self.line(&format!(
+                            "local {second} = {source}[{first}]"
+                        ));
+                    }
+                    _ => {
+                        return Err(Error::at(
+                            item.pat.span(),
+                            "map loops take one or two bindings",
+                        ));
+                    }
+                }
+                self.statement_block(&item.body)?;
+                self.indent = self.indent.saturating_sub(1);
+                self.line("end");
+                return Ok(());
+            }
             let names = bindings
                 .iter()
                 .map(|name| name.clone().unwrap_or_else(|| "_".to_owned()))
                 .collect::<Vec<_>>();
-            let head = match names.as_slice() {
-                [name] => format!("_, {name}"),
-                [first, second] => format!("{first}, {second}"),
+            let keys = self.temp();
+            let position = self.temp();
+            self.line(&format!("local {keys} = {{}}"));
+            self.line(&format!(
+                "for __key in pairs({source}) do {keys}[#({keys}) + 1] = __key end"
+            ));
+            self.line(&format!(
+                "table.sort({keys}, function(a, b) return tostring(a) < tostring(b) end)"
+            ));
+            self.line(&format!("for {position} = 1, #{keys} do"));
+            self.indent = self.indent.saturating_add(1);
+            match names.as_slice() {
+                [name] => {
+                    self.push(name, Ty::STR);
+                    self.line(&format!("local {name} = {keys}[{position}]"));
+                }
+                [first, second] => {
+                    self.push(first, Ty::STR);
+                    self.push(second, Ty::VALUE);
+                    self.line(&format!("local {first} = {keys}[{position}]"));
+                    self.line(&format!("local {second} = {source}[{first}]"));
+                }
                 _ => {
                     return Err(Error::at(
                         item.pat.span(),
                         "map loops take one or two bindings",
                     ));
                 }
-            };
-            for name in bindings.iter().flatten() {
-                self.push(name, Ty::VALUE);
             }
-            self.line(&format!("for {head} in pairs({source}) do"));
+            self.statement_block(&item.body)?;
+            self.indent = self.indent.saturating_sub(1);
+            self.line("end");
+            return Ok(());
+        }
+        if ty.base == Base::Table && bindings.len() == 1 {
+            let name = bindings[0].clone().unwrap_or_default();
+            let keys = self.temp();
+            let index = self.temp();
+            self.line(&format!("local {keys} = {{}}"));
+            self.line(&format!(
+                "for __key in pairs({source}) do {keys}[#({keys}) + 1] = __key end"
+            ));
+            self.line(&format!(
+                "table.sort({keys}, function(a, b) return tostring(a) < tostring(b) end)"
+            ));
+            self.line(&format!("for {index} = 1, #{keys} do"));
             self.indent = self.indent.saturating_add(1);
+            self.push(&name, Ty::VALUE);
+            self.line(&format!("local {name} = {source}[{keys}[{index}]]"));
             self.statement_block(&item.body)?;
             self.indent = self.indent.saturating_sub(1);
             self.line("end");
@@ -1236,8 +1615,8 @@ impl<'a> Emitter<'a> {
             self.indent = self.indent.saturating_add(1);
             let first = bindings[0].clone().unwrap_or_else(|| "_".to_owned());
             let second = bindings[1].clone().unwrap_or_else(|| "_".to_owned());
-            for name in bindings.iter().flatten() {
-                self.push(name, Ty::VALUE);
+            for (position, name) in bindings.iter().flatten().enumerate() {
+                self.push(name, self.key_ty(position));
             }
             self.line(&format!(
                 "for {first}, {second} in pairs(type({source}) == \"table\" and {source} or {{}}) do"
@@ -1260,6 +1639,11 @@ impl<'a> Emitter<'a> {
             };
             let value = if enumerate && position == 0 {
                 format!("({index} - 1)")
+            } else if !enumerate
+                && bindings.len() == 1
+                && matches!(&*item.pat, Pat::Ident(_))
+            {
+                format!("{source}[{index}]")
             } else {
                 format!(
                     "{source}[{index}]{}",
@@ -1287,6 +1671,30 @@ impl<'a> Emitter<'a> {
         Ok(())
     }
 
+    pub(super) fn tuple_shapes(
+        &mut self,
+        items: &[Expr],
+    ) -> Result<Vec<TupleShape>, Error> {
+        let mut shapes = Vec::new();
+        for item in items {
+            let (_, ty) = self.expr(item)?;
+            let shape = if let Expr::Tuple(inner) = strip_reference(item) {
+                TupleShape::Tuple(self.tuple_shapes(
+                    &inner.elems.iter().cloned().collect::<Vec<_>>(),
+                )?)
+            } else {
+                TupleShape::Leaf(ty)
+            };
+            shapes.push(shape);
+        }
+        Ok(shapes)
+    }
+
+    /// A map loop's first binding is the key, a string in every JSON object.
+    fn key_ty(&self, position: usize) -> Ty {
+        if position == 0 { Ty::STR } else { Ty::VALUE }
+    }
+
     pub(super) fn assign(
         &mut self,
         left: &Expr,
@@ -1304,14 +1712,99 @@ impl<'a> Emitter<'a> {
             }
             return Ok(());
         }
+        if matches!(strip_reference(left), Expr::Index(_)) {
+            reject_null(&text, ty, right.span(), "an index assignment")?;
+        }
+        let call_shape = if matches!(strip_reference(right), Expr::Call(_)) {
+            self.last_tuple_shape
+                .take()
+                .or_else(|| self.tuple_expr_shapes.get(&text).cloned())
+        } else {
+            None
+        };
         self.line(&format!("{target} {op} {text}"));
         if is_local && let Some(name) = path_ident(strip_reference(left)) {
+            self.tuple_types.remove(&name);
+            self.tuple_expr_text.remove(&name);
+            let prefix = format!("{name}.");
+            let stale = self
+                .tuple_expr_shapes
+                .keys()
+                .filter(|key| {
+                    key.starts_with(&prefix) || *key == &name || *key == &text
+                })
+                .cloned()
+                .collect::<Vec<_>>();
+            for key in stale {
+                self.tuple_expr_shapes.remove(&key);
+            }
+            if let Expr::Tuple(items) = strip_reference(right) {
+                let shapes = self.tuple_shapes(
+                    &items.elems.iter().cloned().collect::<Vec<_>>(),
+                )?;
+                self.tuple_types.insert(name.clone(), shapes.clone());
+                self.tuple_expr_shapes.insert(name.clone(), shapes);
+            } else if let Expr::Struct(item) = strip_reference(right)
+                && let Some(class) =
+                    item.path.segments.last().map(|s| s.ident.to_string())
+            {
+                let prefix = format!("{class}.");
+                let inherited = self
+                    .tuple_expr_shapes
+                    .iter()
+                    .filter_map(|(key, shapes)| {
+                        key.strip_prefix(&prefix)
+                            .map(|field| (field.to_owned(), shapes.clone()))
+                    })
+                    .collect::<Vec<_>>();
+                for (field, shapes) in inherited {
+                    self.tuple_expr_shapes
+                        .insert(format!("{name}.{field}"), shapes);
+                }
+                for field in &item.fields {
+                    if let syn::Member::Named(member) = &field.member
+                        && let Expr::Tuple(items) = strip_reference(&field.expr)
+                    {
+                        let shapes = self.tuple_shapes(
+                            &items.elems.iter().cloned().collect::<Vec<_>>(),
+                        )?;
+                        self.tuple_expr_shapes
+                            .insert(format!("{name}.{member}"), shapes);
+                    }
+                }
+            } else if let Some(source) = path_ident(strip_reference(right)) {
+                if let Some(shapes) = self.tuple_types.get(&source).cloned() {
+                    self.tuple_types.insert(name.clone(), shapes.clone());
+                    self.tuple_expr_shapes.insert(name.clone(), shapes);
+                }
+                let prefix = format!("{source}.");
+                let fields = self
+                    .tuple_expr_shapes
+                    .iter()
+                    .filter_map(|(key, shapes)| {
+                        key.strip_prefix(&prefix)
+                            .map(|field| (field.to_owned(), shapes.clone()))
+                    })
+                    .collect::<Vec<_>>();
+                for (field, shapes) in fields {
+                    self.tuple_expr_shapes
+                        .insert(format!("{name}.{field}"), shapes);
+                }
+            } else if let Some(shapes) = call_shape {
+                self.tuple_types.insert(name.clone(), shapes.clone());
+                self.tuple_expr_shapes.insert(name.clone(), shapes);
+            } else if let Some(shapes) =
+                self.tuple_expr_shapes.get(&text).cloned()
+            {
+                self.tuple_types.insert(name.clone(), shapes.clone());
+                self.tuple_expr_shapes.insert(name.clone(), shapes);
+            }
             self.push(&name, ty);
         }
         Ok(())
     }
 
-    fn assign_target(
+    pub(super) fn assign_target(
         &mut self,
         expr: &Expr,
         is_local: &mut bool,

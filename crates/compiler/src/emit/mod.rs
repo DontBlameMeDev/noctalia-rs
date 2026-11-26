@@ -2,10 +2,10 @@
 //!
 //! `mod.rs` holds `Emitter`, `Body` and the output buffer. `statements.rs`
 //! lowers statements and patterns, `expressions.rs` expressions,
-//! `methods.rs` method calls, `calls.rs` call forms, `macros.rs` macro
-//! lowering, `ops.rs` `Op` construction, `native.rs` the native boundary,
-//! `inline.rs` helper inlining, `constants.rs` constants and statics, and
-//! `types.rs` the type model.
+//! `methods` method calls, split there by receiver class, `calls.rs` call
+//! forms, `macros.rs` macro lowering, `ops.rs` `Op` construction, `native.rs`
+//! the native boundary, `inline.rs` helper inlining, `constants.rs` constants
+//! and statics, and `types.rs` the type model.
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 
@@ -83,6 +83,16 @@ impl<'a> Emitter<'a> {
             classes: HashMap::new(),
             self_class: None,
             pending_class: None,
+            pending_null_fields: None,
+            null_fields: HashMap::new(),
+            tuple_types: HashMap::new(),
+            tuple_expr_shapes: HashMap::new(),
+            tuple_expr_text: HashMap::new(),
+            last_tuple_shape: None,
+            unknown_value_tuple: false,
+            null_texts: std::collections::BTreeSet::new(),
+            last_value_ty: None,
+            newtype_types: HashMap::new(),
             value_helper: false,
             in_statement: false,
             value_needed: false,
@@ -100,6 +110,9 @@ impl<'a> Emitter<'a> {
             uses_bool_or: false,
             uses_replace: false,
             uses_source: false,
+            uses_deep_clone: false,
+            uses_array_shape: false,
+            uses_count_keys: false,
             emitted: false,
             temp: 0,
             native_mode,
@@ -177,6 +190,45 @@ impl<'a> Emitter<'a> {
         if self.uses_entry {
             source.push_str("  local entry = ENTRY\n");
         }
+        if self.uses_array_shape {
+            source.push_str(&format!(
+                concat!(
+                    "  local function is_array(value)\n",
+                    "    if type(value) ~= \"table\" then return false end\n",
+                    "    local meta = getmetatable(value)\n",
+                    "    if type(meta) == \"table\" and meta.{ARRAY_MARKER} then return true end\n",
+                    "    local length = #value\n",
+                    "    if length == 0 then return false end\n",
+                    "    local count = 0\n",
+                    "    for key in pairs(value) do\n",
+                    "      if type(key) ~= \"number\" or key % 1 ~= 0 or key < 1 or key > length then return false end\n",
+                    "      count = count + 1\n",
+                    "    end\n",
+                    "    return count == length\n",
+                    "  end\n",
+                ),
+                ARRAY_MARKER = ARRAY_MARKER,
+            ));
+        }
+        if self.uses_count_keys {
+            source.push_str(concat!(
+                "  local function count_keys(value)\n",
+                "    local count = 0\n",
+                "    for _ in pairs(value) do count = count + 1 end\n",
+                "    return count\n",
+                "  end\n",
+            ));
+        }
+        if self.uses_deep_clone {
+            source.push_str(concat!(
+                "  local function deep_clone(value)\n",
+                "    if type(value) ~= \"table\" then return value end\n",
+                "    local copy = setmetatable({}, getmetatable(value))\n",
+                "    for key, item in pairs(value) do copy[key] = deep_clone(item) end\n",
+                "    return copy\n",
+                "  end\n",
+            ));
+        }
         source.push_str(&self.out);
         Body {
             source,
@@ -244,6 +296,39 @@ impl<'a> Emitter<'a> {
     pub(super) fn temp(&mut self) -> String {
         self.temp = self.temp.saturating_add(1);
         format!("__t{}", self.temp)
+    }
+}
+
+/// The Luau expression for an empty JSON array.
+///
+/// An empty table is the one container shape Luau cannot tell from an empty
+/// object, so arrays carry a metatable marker that `noctalia.json.encode` and
+/// `json.decode` honor. `crates/luau` keeps the same field name and asserts
+/// the pair in `tests`.
+pub(crate) const ARRAY_MARKER: &str = "__noctalia_array";
+
+/// Where a list iterator keeps its position, in the table's metatable so the
+/// elements stay a clean sequence.
+pub(crate) const CURSOR_MARKER: &str = "__noctalia_cursor";
+
+pub(crate) fn empty_array() -> String {
+    format!("setmetatable({{}}, {{ {ARRAY_MARKER} = true }})")
+}
+
+/// The shape of a tuple value, kept so nested destructuring can carry the
+/// nullness of an inner element through each step.
+#[derive(Clone)]
+pub(crate) enum TupleShape {
+    Leaf(Ty),
+    Tuple(Vec<TupleShape>),
+}
+
+impl TupleShape {
+    pub(crate) fn any_null(&self) -> bool {
+        match self {
+            Self::Leaf(ty) => ty.null,
+            Self::Tuple(shapes) => shapes.iter().any(Self::any_null),
+        }
     }
 }
 
@@ -342,6 +427,16 @@ pub(crate) struct Emitter<'a> {
     classes: HashMap<String, String>,
     self_class: Option<String>,
     pending_class: Option<String>,
+    pending_null_fields: Option<BTreeSet<String>>,
+    null_fields: HashMap<String, BTreeSet<String>>,
+    tuple_types: HashMap<String, Vec<TupleShape>>,
+    tuple_expr_shapes: HashMap<String, Vec<TupleShape>>,
+    tuple_expr_text: HashMap<String, String>,
+    last_tuple_shape: Option<Vec<TupleShape>>,
+    unknown_value_tuple: bool,
+    null_texts: std::collections::BTreeSet<String>,
+    last_value_ty: Option<Ty>,
+    newtype_types: HashMap<String, Ty>,
     value_helper: bool,
     in_statement: bool,
     value_needed: bool,
@@ -359,6 +454,9 @@ pub(crate) struct Emitter<'a> {
     uses_bool_or: bool,
     uses_replace: bool,
     uses_source: bool,
+    uses_deep_clone: bool,
+    uses_array_shape: bool,
+    uses_count_keys: bool,
     emitted: bool,
     temp: usize,
     native_mode: NativeMode,

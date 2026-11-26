@@ -2,6 +2,10 @@ use crate::{EntryKind, StrictOptions, compile};
 
 use super::{source, strict_options};
 
+/// The metatable a `json!`/`Vec::new` empty array carries, so the runtime can
+/// tell it from an empty object.
+const EMPTY_ARRAY: &str = "setmetatable({}, { __noctalia_array = true })";
+
 fn compile_strict(
     handler: &str,
     assets: &[(&str, u32)],
@@ -72,11 +76,8 @@ fn handler(ctx: &Context) -> Result<Vec<Op>> {
 }
 "#;
     let output = compile_strict(handler, &[]).expect("compile");
-    assert!(output.contains("local config = CONFIG"), "{output}");
-    assert!(
-        output.contains("local translations = TRANSLATIONS"),
-        "{output}"
-    );
+    assert!(output.contains("deep_clone(CONFIG)"), "{output}");
+    assert!(output.contains("deep_clone(TRANSLATIONS)"), "{output}");
 }
 
 #[test]
@@ -259,12 +260,16 @@ fn handler(_ctx: &Context) -> Result<Vec<Op>> {
 "#;
     let output = compile_strict(handler, &[]).expect("compile");
     assert!(
-        output.contains("noctalia.pluginDataDir(__unpack({}))"),
+        output.contains(&format!(
+            "noctalia.pluginDataDir(__unpack({EMPTY_ARRAY}))"
+        )),
         "{output}"
     );
     assert!(output.contains("noctalia.getSetting(__unpack("), "{output}");
     assert!(
-        output.contains("(noctalia.outputs(__unpack({})) == true)"),
+        output.contains(&format!(
+            "(noctalia.outputs(__unpack({EMPTY_ARRAY})) == true)"
+        )),
         "{output}"
     );
     assert!(output.contains("return { ok = true, value ="), "{output}");
